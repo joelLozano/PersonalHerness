@@ -105,18 +105,28 @@ def _triage(task: str):
     return render(triage(store().root, task, store=store()))
 
 
+AGENT_KINDS = [k for k in KINDS if k not in ("code", "spec", "scan", "rule", "profile")]
+
+
 @tool("memory_add", _s(
     "Guarda conocimiento durable (1-3 frases autocontenidas). Nada trivial ni temporal.",
     text={"type": "string", "required": True},
-    kind={"type": "string", "enum": [k for k in KINDS if k not in ("code", "spec", "scan")], "required": True},
+    kind={"type": "string", "enum": [k for k in KINDS if k not in ("code", "spec", "scan", "rule", "profile")], "required": True},
     tags={"type": "string"},
     source={"type": "string", "description": "Archivo o feature"},
     agent={"type": "string"},
 ))
 def _add(text: str, kind: str = "note", tags: str = "", source: str = "", agent: str = ""):
-    if kind not in KINDS:
-        raise ValueError(f"kind inválido. Opciones: {list(KINDS)}")
-    mid = store().add(text, kind, tags, source, agent)
+    from .security import suspicious
+    if kind not in AGENT_KINDS:
+        raise ValueError(f"kind no permitido para agentes: {kind}. Opciones: {AGENT_KINDS}. "
+                         "Las reglas permanentes solo las crea el usuario (`agentes memory add -k rule`).")
+    flags = suspicious(text)
+    if flags:
+        _log(f"memory_add rechazado ({', '.join(flags)}): {text[:200]}")
+        raise ValueError(f"Rechazado: el texto parece una instrucción peligrosa ({', '.join(flags)}). "
+                         "La memoria vuelve al contexto de todos los agentes; guarda hechos, no órdenes.")
+    mid = store().add(text, kind, tags, source, f"mcp:{agent or 'agente'}")
     return f"Guardado #{mid} [{kind}]"
 
 
@@ -129,7 +139,14 @@ def _list(kind: str | None = None, limit: int = 30):
 @tool("memory_delete", _s("Elimina memorias obsoletas por id.",
                           ids={"type": "array", "items": {"type": "integer"}, "required": True}))
 def _delete(ids: list[int]):
-    return f"Eliminadas {store().delete([int(i) for i in ids])} memorias."
+    ids = [int(i) for i in ids][:10]  # máximo 10 por llamada
+    q = ",".join("?" * len(ids)) or "NULL"
+    protected = {r[0] for r in store().db.execute(
+        f"SELECT id FROM memories WHERE id IN ({q}) AND kind IN ('rule','profile')", ids)}
+    allowed = [i for i in ids if i not in protected]
+    _log(f"memory_delete {allowed} (protegidas: {sorted(protected)})")
+    msg = f"Eliminadas {store().delete(allowed)} memorias."
+    return msg + (f" No se eliminaron {sorted(protected)}: reglas y perfil solo los cambia el usuario." if protected else "")
 
 
 @tool("profile_get", _s("Perfil del proyecto (kickoff/onboarding).", key={"type": "string"}))
@@ -192,6 +209,14 @@ def _tupdate(id: int, **kw):
 
 
 # ---------------------------------------------------------------------------- protocolo
+def _log(msg: str) -> None:
+    try:
+        from .logs import log
+        log("mcp", msg)
+    except Exception:
+        pass
+
+
 def _reply(id_, result=None, error=None):
     msg = {"jsonrpc": "2.0", "id": id_}
     if error is not None:
@@ -227,6 +252,7 @@ def handle(msg: dict) -> None:
             text = TOOLS[name][1](**args)
             _reply(id_, {"content": [{"type": "text", "text": str(text)}], "isError": False})
         except Exception as e:
+            _log(f"tools/call {name} error: {e}")
             _reply(id_, {"content": [{"type": "text", "text": f"Error: {e}"}], "isError": True})
     elif method in ("resources/list", "prompts/list"):
         _reply(id_, {method.split("/")[0]: []})

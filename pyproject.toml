@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentes"
-version = "0.7.0"
+version = "0.8.0"
 description = "Harness de equipo de desarrollo profesional (multi-agente) para Claude Code y Kiro, con memoria vectorial"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["pyyaml>=6", "pillow>=10"]
+dependencies = ["pyyaml>=6,<7", "pillow>=10,<14"]
 
 [project.optional-dependencies]
-vector = ["chromadb>=0.5", "fastembed>=0.4"]
+vector = ["chromadb>=0.5,<2", "fastembed>=0.4,<1"]
 dev = ["pytest>=8"]
 
 [project.scripts]

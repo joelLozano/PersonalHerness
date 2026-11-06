@@ -595,7 +595,7 @@ kiro:
   # Archivos que Kiro IDE no debe leer (ahorra tokens y protege secretos). Se escribe en un bloque gestionado
   # de .kiroignore (sintaxis gitignore); tus propias líneas fuera del bloque se respetan.
   kiroignore: [node_modules/, dist/, build/, out/, .next/, .nuxt/, .turbo/, .cache/, coverage/, vendor/, target/,
-               "*.min.js", "*.map", "*.lock", package-lock.json, pnpm-lock.yaml, .agentes/agentes.db, .agentes/vectors/,
+               "*.min.js", "*.map", "*.lock", package-lock.json, pnpm-lock.yaml, ".agentes/agentes.db*", .agentes/vectors/,
                .agentes/backup/, .agentes/design/compare/, .env, .env.*,
                "!.env.example", "!.env.sample"]
 

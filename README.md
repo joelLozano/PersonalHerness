@@ -351,7 +351,51 @@ Si cambias el modelo, ejecuta `agentes memory rebuild`. Cada modelo tiene su pro
 - **Protocolo común**: todos los agentes leen el contexto antes de trabajar y guardan solo conocimiento durable al terminar.
 - **Compartir con tu equipo**: la base de datos no se sube a git. Usa `agentes memory export` para generar `.agentes/memory.json` y súbelo; quien lo reciba ejecuta `agentes memory import`.
 
-## 9. Comandos para modificar y mejorar el harness
+## 9. Seguridad
+
+| Riesgo | Protección |
+|---|---|
+| Secretos en la memoria | Los archivos sensibles **nunca se indexan**: `.env*` (salvo `.env.example`), llaves, keystores, perfiles de firma, `google-services.json`, `GoogleService-Info.plist`, `local.properties`, credenciales. Todo texto que entra en la memoria pasa por una **redacción** que reemplaza claves conocidas (AWS, Stripe, Google, GitHub, Slack, Figma, JWT, claves privadas, `password = "…"`, URLs con usuario:contraseña) por `«REDACTADO»`, y deja intactas las referencias como `BuildConfig.X` o `process.env.X` |
+| Instrucciones maliciosas que se vuelven permanentes | Los agentes **no pueden crear reglas** (las que siempre van en el contexto) ni editar el perfil; eso solo lo haces tú o la migración. Lo que un agente intenta guardar se rechaza si parece una orden peligrosa: descargar y ejecutar scripts, ignorar instrucciones, desactivar controles, exfiltrar o `sudo`. La memoria se presenta a los agentes como *datos*, no como instrucciones |
+| Acciones destructivas sin preguntarte | Claude Code solo aprueba solos los subcomandos de lectura o de efecto acotado (`context`, `scan`, `index`, `triage`, `ds check`, `design compare`…). Los que cambian o borran cosas (`install`, `sync`, `migrate`, `memory delete`, `uninstall`, `trust`, `upgrade`) siempre te piden permiso |
+| Lectura de secretos por los agentes | Claude Code: reglas `deny` para `.env`, `*.pem`, `*.p12`, keystores, `local.properties`, `~/.ssh`, `~/.aws`… Kiro: el `.kiroignore` gestionado |
+| Repos clonados con configuraciones maliciosas | `team.local.yaml` y `requisitos.conf` versionados en un repo **no se aplican hasta que los apruebes**. `agentes trust` muestra qué cambian y marca lo sospechoso; cualquier cambio posterior vuelve a requerir aprobación. Los requisitos definidos por un repo muestran el comando exacto, se confirman escribiendo `si` y **nunca** se instalan con `--yes` |
+| Dependencias | Versiones acotadas (`pyyaml<7`, `pillow<14`, `chromadb<2`, `fastembed<1`). El servidor MCP no usa dependencias externas |
+| Diagnóstico | `.agentes/agentes.log` (rotativo) registra errores de hooks y del MCP, y cada rechazo de seguridad |
+
+```bash
+agentes audit          # permisos, secretos en la memoria, reglas creadas por agentes, personalizaciones, .gitignore, token de Figma
+agentes audit --fix    # redacta secretos, elimina fragmentos de archivos sensibles y reglas de agentes (bases de versiones anteriores)
+agentes trust          # revisa y aprueba team.local.yaml / requisitos.conf del repo
+```
+Si actualizas desde una versión anterior, ejecuta `agentes audit --fix` y `agentes trust` una vez en cada proyecto.
+
+**Robustez:**
+- SQLite en modo WAL con espera de bloqueo, para que el MCP, los hooks y el indexado trabajen a la vez.
+- Esquema versionado con migraciones automáticas. Si la base viene de un CLI más nuevo, verás un aviso claro en lugar de que se corrompa.
+- Candado entre procesos para las escrituras en la base vectorial.
+
+## 10. Mantenimiento y prueba piloto
+
+```bash
+agentes doctor         # instalación + autoprueba de hooks (latencia y tokens) + MCP + errores recientes del log
+agentes clean          # restos que ya no se usan, uno por uno y con respaldo (respaldos viejos, capturas, hooks .kiro.hook 0.x, huérfanos, colecciones de modelos viejos)
+agentes projects       # dónde tienes instalado el harness
+agentes upgrade        # git pull del harness + reinstalar + `agentes sync` en todos tus proyectos
+```
+El repositorio incluye CI (`.github/workflows/tests.yml`) que corre los tests en macOS y Linux con Python 3.10 y 3.12 al subirlo a GitHub.
+
+**Lista de verificación de la prueba piloto** (hazla una vez en un proyecto real):
+1. `./install.sh` → `cd proyecto` → `agentes install --ide kiro` (o `claude`) → `agentes doctor`: todo ✔.
+2. `agentes audit`: sin hallazgos altos. `agentes ds show` y `agentes ds map`: que tu DS esté completo y bien mapeado.
+3. En el IDE, ejecuta `/onboard`. El informe y las preguntas deben tener sentido para tu proyecto.
+4. Pide un **cambio pequeño** (XS/S). Debe resolverse en la misma sesión, **sin workflows ni delegación**, y el bloque "Triaje agentes" debe llegar con los archivos correctos.
+5. Pide una **pantalla pequeña**. Debe usar componentes de tu DS. Agrega a propósito un `Text`/`Button` nativo y comprueba que al terminar el turno el hook lo detecta y el agente lo corrige.
+6. Pide algo **L**. Debe proponer Spec o receta con su costo y **esperar tu confirmación**.
+7. `agentes bench` y, con memoria acumulada, `/bench`: decide entre vectores y `--lite`.
+8. Revisa `.agentes/agentes.log` y el consumo de créditos de la sesión.
+
+## 11. Comandos para modificar y mejorar el harness
 
 ### Instalación y mantenimiento
 ```bash
@@ -363,6 +407,9 @@ agentes requisitos --check | --yes | --solo-requeridos | --lista
 agentes uninstall [--purge]                       # quitar del proyecto (--purge borra también la memoria)
 agentes ide list | add kiro | remove claude       # IDEs para los que se genera el equipo
 agentes migrate [--apply] [--keep] [--include G]  # migrar .md y configuraciones previas (ver sección 7)
+agentes audit [--fix] · agentes trust              # seguridad (ver sección 9)
+agentes clean · agentes projects · agentes upgrade # mantenimiento (ver sección 10)
+./requisitos.sh --solo-proyecto                    # solo los requisitos que define el repo
 ./install.sh                                      # reinstalar el CLI (por ejemplo, tras añadir dependencias)
 ```
 
@@ -439,7 +486,7 @@ agentes task list [--all] [-s doing] · set <id> <estado> [nota] · done <ids> �
      auto_recall: false
    ```
 
-## 10. Estructura
+## 12. Estructura
 
 ```
 agentes/
@@ -453,6 +500,9 @@ agentes/
   ds.py            # design system: índice, catálogo compacto, lookup, verificación de uso
   profiles/mobile.yaml  # perfil mobile nativo (iOS/Android) que se fusiona sobre team.yaml
   design.py        # referencias visuales: paleta exacta, comparación visual, capturas, importación de Figma
+  security.py      # archivos sensibles, redacción de secretos, filtro de instrucciones, confianza en el repo
+  clean.py         # limpieza de restos con respaldo
+  logs.py          # log rotativo .agentes/agentes.log
   triage.py        # triaje: tipo y peso de la tarea, ruta más barata y localización de código
   store.py         # memoria: SQLite + FTS5 + ChromaDB (híbrida), perfil, tareas
   scanner.py       # análisis de proyectos existentes + indexado incremental de código

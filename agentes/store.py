@@ -9,6 +9,7 @@ Reciprocal Rank Fusion. Si ChromaDB no está disponible, funciona solo con BM25.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -85,6 +86,34 @@ CREATE TABLE IF NOT EXISTS files (
 
 TASK_STATUSES = ("todo", "doing", "review", "testing", "blocked", "done")
 
+# Versión del esquema de la BD (PRAGMA user_version). Cada entrada migra desde la versión anterior.
+SCHEMA_VERSION = 2
+MIGRATIONS = {
+    2: ["CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind)",
+        "CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source)",
+        "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)"],
+}
+
+
+@contextlib.contextmanager
+def file_lock(path: Path):
+    """Candado exclusivo entre procesos (servidor MCP, hooks e indexado escriben la misma base vectorial)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a+") as fh:
+        try:
+            import fcntl
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        except (ImportError, OSError):
+            pass
+        try:
+            yield
+        finally:
+            try:
+                import fcntl
+                fcntl.flock(fh, fcntl.LOCK_UN)
+            except (ImportError, OSError):
+                pass
+
 
 def find_root(start: str | os.PathLike | None = None) -> Path:
     """Sube directorios hasta encontrar `.agentes/`; si no, usa la raíz git o cwd."""
@@ -108,9 +137,17 @@ class Store:
         self.root = find_root(root) if root is None else Path(root).resolve()
         self.dir = self.root / HARNESS_DIR
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.dir / "agentes.db")
+        self.db = sqlite3.connect(self.dir / "agentes.db", timeout=15)
         self.db.row_factory = sqlite3.Row
+        # WAL: lecturas y escrituras concurrentes (MCP + hooks + indexado) sin "database is locked"
+        try:
+            self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.OperationalError:
+            pass
+        self.db.execute("PRAGMA busy_timeout=15000")
         self.db.executescript(SCHEMA)
+        self._migrate()
         self.db.commit()
         if use_vectors is None:
             use_vectors = embedding_function is not None or os.environ.get("AGENTES_NO_VECTORS") != "1"
@@ -120,6 +157,19 @@ class Store:
         self.model_label = ""
         self._col = None
         self._vector_error: str | None = None
+
+    def _migrate(self) -> None:
+        ver = self.db.execute("PRAGMA user_version").fetchone()[0]
+        if ver > SCHEMA_VERSION:
+            raise RuntimeError(f"La memoria de este proyecto usa el esquema v{ver}, más nuevo que el de este CLI "
+                               f"(v{SCHEMA_VERSION}). Actualiza con `agentes upgrade`.")
+        for v in range(ver + 1, SCHEMA_VERSION + 1):
+            for stmt in MIGRATIONS.get(v, []):
+                self.db.execute(stmt)
+            self.db.execute(f"PRAGMA user_version = {v}")
+
+    def _vlock(self):
+        return file_lock(self.dir / "vectors.lock")
 
     # ------------------------------------------------------------------ vectores
     FAIL_TTL = 3600  # tras un fallo de carga del modelo, usar solo BM25 durante 1 hora (sin reintentos lentos)
@@ -223,6 +273,8 @@ class Store:
         text = (text or "").strip()
         if not text:
             return None
+        from .security import redact
+        text, _ = redact(text)
         if isinstance(tags, list):
             tags = ",".join(tags)
         h = _hash(kind, text, source)
@@ -237,7 +289,8 @@ class Store:
         mid = cur.lastrowid
         if _vector and kind != "code" and self.collection is not None:
             try:
-                self.collection.upsert(
+                with self._vlock():
+                    self.collection.upsert(
                     ids=[str(mid)], documents=[text],
                     metadatas=[{"kind": kind, "source": source or "", "tags": tags or ""}],
                 )
@@ -249,8 +302,9 @@ class Store:
         """Inserción masiva (usada por el indexador de código)."""
         ids, vids, docs, metas = [], [], [], []
         now = time.time()
+        from .security import redact
         for it in items:
-            text = it["text"].strip()
+            text = redact(it["text"].strip())[0]
             if not text:
                 continue
             kind, source, tags = it.get("kind", "note"), it.get("source", ""), it.get("tags", "")
@@ -269,9 +323,10 @@ class Store:
         self.db.commit()
         if vids and self.collection is not None:
             try:
-                for i in range(0, len(vids), 200):
-                    self.collection.upsert(ids=[str(x) for x in vids[i:i + 200]],
-                                           documents=docs[i:i + 200], metadatas=metas[i:i + 200])
+                with self._vlock():
+                    for i in range(0, len(vids), 200):
+                        self.collection.upsert(ids=[str(x) for x in vids[i:i + 200]],
+                                               documents=docs[i:i + 200], metadatas=metas[i:i + 200])
             except Exception as e:
                 self._disable_vectors(e)
         return ids
@@ -284,7 +339,8 @@ class Store:
         self.db.commit()
         if self.collection is not None:
             try:
-                self.collection.delete(ids=[str(i) for i in ids])
+                with self._vlock():
+                    self.collection.delete(ids=[str(i) for i in ids])
             except Exception:
                 pass
         return n
@@ -436,7 +492,8 @@ class Store:
     def context_summary(self, max_chars: int = 6000) -> str:
         """Resumen compacto que se inyecta al iniciar cada sesión."""
         parts = []
-        rules = list(reversed(self.list("rule", 60)))
+        # solo reglas del usuario o de la migración (un agente no puede crear reglas permanentes)
+        rules = [r for r in reversed(self.list("rule", 60)) if not str(r.get("agent", "")).startswith("mcp")]
         if rules:
             budget, lines = 2500, []
             for r in rules:

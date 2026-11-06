@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 import shutil
 import sys
@@ -19,9 +20,10 @@ BASE_TEAM = PKG_DIR / "team.yaml"
 LOCAL_TEAM = "team.local.yaml"
 GEN_MARK = "<!-- Generado por `agentes sync`. No edites aquí: usa .agentes/team.local.yaml o `agentes agent ...` -->"
 BLOCK_START, BLOCK_END = "<!-- agentes:start -->", "<!-- agentes:end -->"
-GITIGNORE_LINES = [".agentes/agentes.db", ".agentes/vectors/", ".agentes/scan.json", ".agentes/*.log",
+GITIGNORE_LINES = [".agentes/agentes.db*", ".agentes/vectors/", ".agentes/scan.json", ".agentes/*.log",
                    ".agentes/recall-state.json", ".agentes/backup/", ".agentes/vectors-error.json",
-                   ".agentes/design/compare/", ".agentes/design/shots/", ".agentes/design/figma/", ".agentes/index.stamp"]
+                   ".agentes/design/compare/", ".agentes/design/shots/", ".agentes/design/figma/", ".agentes/index.stamp",
+                   ".agentes/agentes.log*", ".agentes/vectors.lock", ".agentes/ds/"]
 
 
 def cli_cmd() -> str:
@@ -91,7 +93,7 @@ def _append_extras(team: dict) -> dict:
     return team
 
 
-def load_team(root: Path | None = None, profiles: list[str] | None = None) -> dict:
+def load_team(root: Path | None = None, profiles: list[str] | None = None, use_local: bool | None = None) -> dict:
     team = yaml.safe_load(BASE_TEAM.read_text(encoding="utf-8"))
     extras: dict[str, list[str]] = {}
     for prof in (profiles if profiles is not None else get_profiles(root)):
@@ -102,7 +104,10 @@ def load_team(root: Path | None = None, profiles: list[str] | None = None) -> di
         if pdata.get("kiro", {}).get("orchestrator_extra"):
             extras.setdefault("kiro_orchestrator_extra", []).append(pdata["kiro"].pop("orchestrator_extra"))
         team = deep_merge(team, pdata)
-    if root is not None and local_team_path(root).exists():
+    if use_local is None:  # personalizaciones del repo: solo si el usuario las aprobó (o las escribió el harness)
+        from .security import is_trusted
+        use_local = root is not None and (os.environ.get("AGENTES_TRUST_ALL") == "1" or is_trusted(Path(root)))
+    if use_local and root is not None and local_team_path(root).exists():
         local = yaml.safe_load(local_team_path(root).read_text(encoding="utf-8")) or {}
         team = deep_merge(team, local)
     for key in ("orchestrator_extra", "shared_protocol_extra"):
@@ -176,6 +181,25 @@ def _load_json(p: Path) -> dict:
     return {}
 
 
+# Subcomandos que los agentes pueden ejecutar sin pedir permiso (solo lectura o efectos acotados al proyecto).
+# Quedan FUERA a propósito: install, sync, uninstall, migrate, memory delete/import/rebuild, design figma --save-token,
+# agent/command/team/perfil/ide (cambian el equipo), trust y upgrade.
+SAFE_ALLOW = ["mcp__agentes"] + [f"Bash(agentes {c}:*)" for c in (
+    "context", "scan", "index", "triage", "doctor", "audit", "bench", "questions",
+    "ds show", "ds lookup", "ds check", "ds map", "ds index",
+    "design list", "design ref", "design compare", "design shot",
+    "requisitos --check", "memory search", "memory list", "memory stats", "task list", "task show",
+)]
+# Archivos con secretos que Claude Code no debe leer (en Kiro lo cubre .kiroignore).
+DENY_READ = [f"Read({p})" for p in (
+    "./.env", "./.env.local", "./.env.development", "./.env.production", "./.env.staging", "./.env.test",
+    "./**/*.pem", "./**/*.key", "./**/*.p8", "./**/*.p12", "./**/*.pfx", "./**/*.jks", "./**/*.keystore",
+    "./**/*.mobileprovision", "./**/local.properties", "./**/keystore.properties", "./**/*.tfvars",
+    "./**/credentials.json", "./**/service-account*.json", "~/.ssh/**", "~/.aws/**",
+    "~/.config/agentes/**",
+)]
+
+
 def _is_ours(command: str) -> bool:
     return bool(re.search(r"(agentes|-m agentes) hook (session-start|prompt|stop)\b", command))
 
@@ -191,10 +215,17 @@ def _merge_hooks(settings: dict, cmd: str) -> dict:
             g["hooks"] = [h for h in g.get("hooks", []) if not _is_ours(h.get("command", ""))]
         groups[:] = [g for g in groups if g.get("hooks")]
         groups.append({"hooks": [{"type": "command", "command": command, "timeout": 20}]})
-    perms = settings.setdefault("permissions", {}).setdefault("allow", [])
-    for p in ("mcp__agentes", "Bash(agentes:*)"):
-        if p not in perms:
-            perms.append(p)
+    perm = settings.setdefault("permissions", {})
+    allow = perm.setdefault("allow", [])
+    if "Bash(agentes:*)" in allow:  # versiones anteriores aprobaban TODOS los subcomandos (incl. destructivos)
+        allow.remove("Bash(agentes:*)")
+    for p in SAFE_ALLOW:
+        if p not in allow:
+            allow.append(p)
+    deny = perm.setdefault("deny", [])
+    for p in DENY_READ:
+        if p not in deny:
+            deny.append(p)
     return settings
 
 
@@ -208,10 +239,16 @@ def _remove_hooks(settings: dict) -> dict:
             del settings["hooks"][event]
     if not settings.get("hooks"):
         settings.pop("hooks", None)
-    perms = settings.get("permissions", {}).get("allow", [])
-    for p in ("mcp__agentes", "Bash(agentes:*)"):
-        if p in perms:
-            perms.remove(p)
+    perm = settings.get("permissions", {})
+    for key, ours in (("allow", SAFE_ALLOW + ["Bash(agentes:*)"]), ("deny", DENY_READ)):
+        lst = perm.get(key, [])
+        for p in ours:
+            if p in lst:
+                lst.remove(p)
+        if key in perm and not lst:
+            perm.pop(key)
+    if "permissions" in settings and not settings["permissions"]:
+        settings.pop("permissions")
     return settings
 
 
@@ -259,9 +296,15 @@ def set_ides(root: Path, ides: list[str]) -> None:
 def sync(root: Path, quiet: bool = False, ides: list[str] | None = None) -> dict:
     """(Re)genera agentes, comandos, hooks, MCP e instrucciones para cada IDE. Idempotente."""
     from . import kiro as kiro_gen
+    from .security import ensure_trusted, mark_trusted
 
     root = root.resolve()
-    team = load_team(root)
+    if not local_team_path(root).exists():
+        (root / HARNESS_DIR).mkdir(exist_ok=True)
+        local_team_path(root).write_text(LOCAL_TEMPLATE, encoding="utf-8")
+        mark_trusted(root)
+    trusted = os.environ.get("AGENTES_TRUST_ALL") == "1" or ensure_trusted(root, interactive=None if not quiet else False)
+    team = load_team(root, use_local=trusted)
     hd = root / HARNESS_DIR
     hd.mkdir(exist_ok=True)
     cfg_path = hd / "config.json"
@@ -323,13 +366,11 @@ def sync(root: Path, quiet: bool = False, ides: list[str] | None = None) -> dict
     if missing:
         gi.write_text("\n".join(lines + (["", "# agentes harness (memoria local)"] if lines else []) + missing) + "\n")
 
-    if not local_team_path(root).exists():
-        local_team_path(root).write_text(LOCAL_TEMPLATE, encoding="utf-8")
-
     cfg.update({"version": __version__, "synced_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "generated": sorted(new_manifest), "cli": cmd, "ides": ides})
     cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
     Store(root)  # crea la BD
+    register_project(root, ides, get_profiles(root))
     return {"ides": ides,
             "agents": len({Path(r).stem for r in new_manifest if "/agents/" in r}),
             "commands": len({Path(r).stem for r in new_manifest
@@ -350,6 +391,31 @@ def _unwire_claude(root: Path) -> None:
         _update_block(root / "CLAUDE.md", None)
 
 
+def _projects_file() -> Path:
+    return Path.home() / ".config" / "agentes" / "projects.json"
+
+
+def load_projects() -> dict:
+    try:
+        return json.loads(_projects_file().read_text())
+    except Exception:
+        return {}
+
+
+def register_project(root: Path, ides: list[str], profiles: list[str], remove: bool = False) -> None:
+    data = load_projects()
+    key = str(Path(root).resolve())
+    if remove:
+        data.pop(key, None)
+    else:
+        data[key] = {"version": __version__, "ides": ides, "perfiles": profiles, "sync": time.strftime("%Y-%m-%d %H:%M")}
+    try:
+        _projects_file().parent.mkdir(parents=True, exist_ok=True)
+        _projects_file().write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    except OSError:
+        pass
+
+
 def uninstall(root: Path, purge: bool = False) -> list[str]:
     root = root.resolve()
     cfg = _load_json(root / HARNESS_DIR / "config.json")
@@ -360,6 +426,7 @@ def uninstall(root: Path, purge: bool = False) -> list[str]:
             p.unlink()
             removed.append(rel)
     _unwire_claude(root)
+    register_project(root, [], [], remove=True)
     from . import kiro as kiro_gen
     kiro_gen.merge_mcp(root, [], remove=True)
     kiro_gen.update_kiroignore(root, None)

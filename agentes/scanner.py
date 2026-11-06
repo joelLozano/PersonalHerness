@@ -492,7 +492,10 @@ def _chunks(text: str, size: int = 60, overlap: int = 10) -> list[tuple[int, str
 
 
 def _indexable(root: Path, f: Path) -> bool:
+    from .security import is_sensitive
     rel = f.relative_to(root).as_posix()
+    if is_sensitive(rel):
+        return False  # credenciales, llaves, keystores, configs de servicios: nunca a la memoria
     if rel.startswith(".kiro/"):
         return rel.startswith(".kiro/specs/")  # de .kiro solo se indexan las specs
     return True

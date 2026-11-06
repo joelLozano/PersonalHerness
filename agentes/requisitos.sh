@@ -10,6 +10,7 @@
 #    ./requisitos.sh --yes                # instala todo lo faltante sin preguntar
 #    ./requisitos.sh --solo-requeridos    # ignora recomendados/opcionales
 #    ./requisitos.sh --lista              # muestra el catálogo completo
+#    ./requisitos.sh --solo-proyecto      # solo lo que define el repo en .agentes/requisitos.conf
 #
 #  Requisitos extra por proyecto: .agentes/requisitos.conf (mismo formato que el
 #  catálogo de abajo). Compatible con bash 3.2 (macOS).
@@ -21,6 +22,7 @@ HARNESS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT="$PWD"
 MODE="interactive"      # interactive | check | yes
 ONLY_REQUIRED=0
+ONLY_PROJECT=0
 SHOW_LIST=0
 
 while [ $# -gt 0 ]; do
@@ -29,8 +31,9 @@ while [ $# -gt 0 ]; do
     --check|-c) MODE="check" ;;
     --yes|-y|--todos) MODE="yes" ;;
     --solo-requeridos|-r) ONLY_REQUIRED=1 ;;
+    --solo-proyecto) ONLY_PROJECT=1 ;;
     --lista|-l) SHOW_LIST=1 ;;
-    -h|--help) sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^#  \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^#  \{0,1\}//'; exit 0 ;;
     *) echo "Opción desconocida: $1 (usa --help)"; exit 2 ;;
   esac
   shift
@@ -109,7 +112,8 @@ adb|requerido|-|adb version|cask:android-platform-tools|pkg:adb|AndroidManifest.
 android-sdk|requerido|-|ver_android_sdk|cask:android-commandlinetools|fn:android_sdk_linux|AndroidManifest.xml,settings.gradle.kts,settings.gradle|Android SDK (o Android Studio)
 EOF
   if [ -f "$PROJECT/.agentes/requisitos.conf" ]; then
-    grep -v '^[[:space:]]*#' "$PROJECT/.agentes/requisitos.conf" | grep '|' || true
+    # requisitos definidos por el repositorio: se marcan como "proyecto" (nunca se instalan sin confirmación)
+    grep -v '^[[:space:]]*#' "$PROJECT/.agentes/requisitos.conf" | grep '|' | sed 's/[[:space:]]*$/|proyecto/' || true
   fi
 }
 
@@ -261,15 +265,16 @@ if [ "$SHOW_LIST" = 1 ]; then
 fi
 
 # ----------------------------------------------------------------------------- revisión
-IDS=(); LVLS=(); MINS=(); VCMDS=(); INSTS=(); DESCS=(); STS=(); VERS=()
-while IFS='|' read -r id lvl min vcmd im il when desc; do
+IDS=(); LVLS=(); MINS=(); VCMDS=(); INSTS=(); DESCS=(); STS=(); VERS=(); SRCS=()
+while IFS='|' read -r id lvl min vcmd im il when desc src; do
   [ -z "$id" ] && continue
   [ "$ONLY_REQUIRED" = 1 ] && [ "$lvl" != "requerido" ] && continue
+  [ "$ONLY_PROJECT" = 1 ] && [ "${src:-}" != "proyecto" ] && continue
   applies "$when" || continue
   inst="$il"; [ "$OS" = "mac" ] && inst="$im"
   [ "$inst" = "-" ] && continue
   check_item "$min" "$vcmd"
-  IDS+=("$id"); LVLS+=("$lvl"); MINS+=("$min"); VCMDS+=("$vcmd"); INSTS+=("$inst"); DESCS+=("$desc")
+  IDS+=("$id"); LVLS+=("$lvl"); MINS+=("$min"); VCMDS+=("$vcmd"); INSTS+=("$inst"); DESCS+=("$desc"); SRCS+=("${src:-}")
   STS+=("$ST"); VERS+=("$VER")
 done < <(catalog)
 
@@ -289,7 +294,8 @@ for ((i = 0; i < ${#IDS[@]}; i++)); do
     missing) icon="${R}✘${N}" ;;
   esac
   min="${MINS[i]}"; [ "$min" = "-" ] && min="cualquiera" || min=">= $min"
-  printf "  %s   %-11s %-12s %-12s %-12s %s\n" "$icon" "${IDS[i]}" "$min" "${VERS[i]}" "${LVLS[i]}" "${DESCS[i]}"
+  extra=""; [ "${SRCS[i]}" = "proyecto" ] && extra=" ${Y}[definido por el proyecto]${N}"
+  printf "  %s   %-11s %-12s %-12s %-12s %s%s\n" "$icon" "${IDS[i]}" "$min" "${VERS[i]}" "${LVLS[i]}" "${DESCS[i]}" "$extra"
   if [ "${STS[i]}" != "ok" ]; then
     MISSING+=("$i")
     [ "${LVLS[i]}" = "requerido" ] && REQ_MISSING=$((REQ_MISSING + 1))
@@ -328,7 +334,17 @@ for i in "${MISSING[@]}"; do
   if [ "$ST" = "ok" ]; then
     echo "${G}✔${N} ${id} ya quedó disponible (${VER})."; INSTALLED+=("$id"); continue
   fi
-  if [ "$MODE" = "yes" ]; then
+  if [ "${SRCS[i]}" = "proyecto" ]; then
+    # Comando definido por el repositorio: podría ser cualquier cosa. Siempre se muestra y se pregunta.
+    echo "${Y}⚠ ${id}: requisito definido por el proyecto (.agentes/requisitos.conf), no por el harness.${N}"
+    echo "  Comando exacto: ${B}${INSTS[i]}${N}"
+    if [ "$MODE" = "yes" ] || ! { [ -r /dev/tty ] && : </dev/tty; } 2>/dev/null; then
+      echo "  Omitido: los requisitos del proyecto nunca se instalan en modo --yes ni sin terminal."; SKIPPED+=("$id"); echo; continue
+    fi
+    printf "  ¿Ejecutar este comando? Escribe 'si' para confirmar: "
+    read -r ans </dev/tty || ans="n"
+    case "$ans" in si|sí|SI|Sí) ans="s" ;; *) SKIPPED+=("$id"); echo; continue ;; esac
+  elif [ "$MODE" = "yes" ]; then
     ans="s"
   else
     echo "${B}${id}${N} — ${DESCS[i]} (${LVLS[i]})"

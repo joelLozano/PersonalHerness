@@ -180,6 +180,8 @@ def save_paths(root: Path, platform: str, paths: list[str]) -> None:
     p.parent.mkdir(exist_ok=True)
     p.write_text("# Personalización del equipo para este proyecto. Aplica con: agentes sync\n"
                  + yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=110), encoding="utf-8")
+    from .security import mark_trusted
+    mark_trusted(root)
 
 
 def _walk(base: Path, exts: tuple[str, ...]) -> list[Path]:

@@ -180,7 +180,7 @@ kiro:
     componentes y tokens del design system (`ds_lookup`); antes de terminar UI ejecuta `agentes ds check`.
   kiroignore: [DerivedData/, build/, .build/, Pods/, Carthage/, "*.xcuserstate", xcuserdata/, .gradle/, "*.apk", "*.aab",
                "*.ipa", "*.dSYM/", local.properties, "*.keystore", "*.jks", "*.p12", "*.mobileprovision", node_modules/,
-               "*.lock", .agentes/agentes.db, .agentes/vectors/, .agentes/backup/, .agentes/design/compare/, .env, .env.*,
+               "*.lock", ".agentes/agentes.db*", .agentes/vectors/, .agentes/backup/, .agentes/design/compare/, .env, .env.*,
                "!.env.example"]
   workflows:
     agentes-feature-lite:

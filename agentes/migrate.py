@@ -252,6 +252,8 @@ def _save_local(root: Path, data: dict) -> None:
     p.parent.mkdir(exist_ok=True)
     p.write_text("# Personalización del equipo para este proyecto. Aplica con: agentes sync\n"
                  + yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=110), encoding="utf-8")
+    from .security import mark_trusted
+    mark_trusted(root)
 
 
 def _agent_entry(p: Path, root: Path, text: str) -> tuple[str, dict]:
@@ -404,6 +406,8 @@ def restore(root: Path, ts: str | None = None, log=print) -> dict:
         shutil.copy2(orig, lp)
     elif lp.exists():
         lp.unlink()
+    from .security import mark_trusted
+    mark_trusted(root)
     store = Store(root)
     ids = [r[0] for r in store.db.execute("SELECT id FROM memories WHERE tags LIKE ?", (f"%{manifest['tag']}%",))]
     store.delete(ids)
