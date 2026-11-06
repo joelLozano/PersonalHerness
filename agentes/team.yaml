@@ -26,6 +26,10 @@ shared_protocol: |
   - **Memoria**: al terminar guarda solo lo durable con `memory_add` (decisiones y su porqué, convenciones, gotchas,
     bugs con causa raíz). Corrige memorias obsoletas.
   - **Calidad**: cambios mínimos; verifica leyendo el código; ejecuta tests/lint/build reales del proyecto.
+  - **Git (regla del usuario)**: NUNCA hagas commit (tampoco `--amend`), ni crees, renombres o borres ramas
+    (`git branch <x>`, `checkout -b`, `switch -c`, `worktree add`), ni hagas push. Aunque te lo pidan: deja los
+    cambios sin commit y entrega el mensaje de commit sugerido y, si hace falta, el comando de rama para que lo
+    ejecute el usuario. Solo lectura: `git status`, `diff`, `log`, `show`, `blame`.
   - **Respuesta final breve** (≤150 palabras): qué hiciste, archivos, cómo verificar, riesgos. Los detalles largos van
     en archivos o en memoria, no en la respuesta. Si algo es ambiguo o estás bloqueado, dilo.
 
@@ -299,7 +303,7 @@ commands:
       4. **Verificación** en paralelo: `code-reviewer`, `qa-engineer` y `security-engineer` (si aplica).
       5. **Corrección**: si hay 🔴/🟠 o tests fallando, repite (máx. 2 ciclos; luego informa).
       6. **Cierre**: tareas en `done`, aprendizajes en memoria, resumen y mensaje de commit sugerido. No hagas commit
-         salvo que el usuario lo pida.
+         ni crees ramas: eso lo hace el usuario.
 
   plan:
     description: Solo planifica - requisitos + diseño técnico + tareas en el tablero, sin implementar
@@ -517,6 +521,8 @@ orchestrator: |
   - **Triaje**: cada mensaje trae un bloque "Triaje agentes" (tipo, peso XS-XL, ruta y código probable). Síguelo:
     XS/S → hazlo tú directamente, sin sub-agentes; M → plan breve + 1 verificación; L/XL → propone plan y costo y
     espera confirmación. Si no te indican archivos, empieza por los del triaje o por `code_locate`.
+  - **Git**: ni tú ni los sub-agentes hacen commit, crean ramas o hacen push, aunque se pida: entrega el mensaje de
+    commit sugerido y los comandos para que el usuario los ejecute.
   - Sub-agentes (solo cuando la ruta lo pide): tech-lead, product-analyst, ux-designer, backend-dev, frontend-dev,
     fullstack-dev, code-reviewer, qa-engineer, security-engineer, devops-engineer. Pásales solo rutas y resúmenes.
   - Flujos: /kickoff (nuevo), /onboard (existente), /feature, /plan, /implement, /review, /test,
@@ -526,6 +532,7 @@ orchestrator: |
 
 # Ajustes de los hooks.
 settings:
+  git_bloqueado: true        # Claude Code: deniega commit, crear ramas y push (la regla en los prompts aplica siempre)
   ds_check_on_stop: true     # al terminar cada turno, revisa que la UI use el design system (si hay catálogo)
   triage: true               # añade a cada mensaje tipo, peso (XS-XL), ruta recomendada y código probable
   # Modelo de embeddings: multilingue (por defecto, ~220 MB) | multilingue-grande (~1 GB) | ingles (~80 MB)
@@ -566,6 +573,8 @@ kiro:
       `agentes-security-audit`) con su costo (~5-14 sesiones) y **lanza workflows solo con confirmación explícita**.
     - Sin archivos indicados: empieza por los del triaje o usa `code_locate`; lee rangos, no archivos completos.
     - Los sub-agentes no ven las Specs: pásales rutas y un resumen, no conversaciones completas.
+    - **Git**: nadie hace commit, crea ramas ni hace push (tampoco en workflows), aunque se pida: entrega el mensaje
+      de commit sugerido y los comandos para que el usuario los ejecute.
     Guarda conocimiento con `memory_add` (no crees .md de notas). Respeta la clave de perfil `autonomia`.
     Comandos: /kickoff /onboard /feature /plan /implement /review /test /security /design /design-ref /fix /tasks /remember /recall /retro /bench
 

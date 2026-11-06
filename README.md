@@ -12,6 +12,8 @@ Tú ─► Claude Code (orquestador)
 Hooks: SessionStart inyecta el contexto del proyecto · UserPromptSubmit recupera memorias relevantes (auto-recall)
 ```
 
+**¿Por dónde empiezo?** Las [guías por caso](docs/guias/README.md) explican paso a paso qué hacer en un proyecto nuevo o existente, web o mobile.
+
 El mismo `team.yaml` genera los archivos de cada IDE. Claude Code usa `.claude/` y `CLAUDE.md`; Kiro usa `.kiro/` (ver la sección 6). La memoria, el perfil y las tareas son los mismos para ambos.
 
 ## 1. Instalación (una vez por máquina)
@@ -360,6 +362,7 @@ Si cambias el modelo, ejecuta `agentes memory rebuild`. Cada modelo tiene su pro
 | Acciones destructivas sin preguntarte | Claude Code solo aprueba solos los subcomandos de lectura o de efecto acotado (`context`, `scan`, `index`, `triage`, `ds check`, `design compare`…). Los que cambian o borran cosas (`install`, `sync`, `migrate`, `memory delete`, `uninstall`, `trust`, `upgrade`) siempre te piden permiso |
 | Lectura de secretos por los agentes | Claude Code: reglas `deny` para `.env`, `*.pem`, `*.p12`, keystores, `local.properties`, `~/.ssh`, `~/.aws`… Kiro: el `.kiroignore` gestionado |
 | Repos clonados con configuraciones maliciosas | `team.local.yaml` y `requisitos.conf` versionados en un repo **no se aplican hasta que los apruebes**. `agentes trust` muestra qué cambian y marca lo sospechoso; cualquier cambio posterior vuelve a requerir aprobación. Los requisitos definidos por un repo muestran el comando exacto, se confirman escribiendo `si` y **nunca** se instalan con `--yes` |
+| Commits y ramas sin tu permiso | Regla del equipo: **ningún agente hace commit, crea ramas ni hace push**, aunque se lo pidas; te entrega el mensaje de commit sugerido y los comandos. En Claude Code además se bloquea con reglas `deny` (`git commit`, `git branch`, `checkout -b`, `switch -c`, `worktree add`, `git push`, `gh pr create`). Para quitar el bloqueo: `settings.git_bloqueado: false` en `team.local.yaml` |
 | Dependencias | Versiones acotadas (`pyyaml<7`, `pillow<14`, `chromadb<2`, `fastembed<1`). El servidor MCP no usa dependencias externas |
 | Diagnóstico | `.agentes/agentes.log` (rotativo) registra errores de hooks y del MCP, y cada rechazo de seguridad |
 

@@ -199,12 +199,19 @@ DENY_READ = [f"Read({p})" for p in (
     "~/.config/agentes/**",
 )]
 
+# Git que solo hace el usuario: commit, ramas y push (settings.git_bloqueado). `git branch` también lista ramas;
+# para ver la actual los agentes usan `git status`.
+DENY_GIT = [f"Bash({c}:*)" for c in (
+    "git commit", "git branch", "git checkout -b", "git checkout -B", "git switch -c", "git switch -C",
+    "git switch --create", "git switch --force-create", "git worktree add", "git push", "gh pr create",
+)]
+
 
 def _is_ours(command: str) -> bool:
     return bool(re.search(r"(agentes|-m agentes) hook (session-start|prompt|stop)\b", command))
 
 
-def _merge_hooks(settings: dict, cmd: str) -> dict:
+def _merge_hooks(settings: dict, cmd: str, git_deny: bool = True) -> dict:
     hooks = settings.setdefault("hooks", {})
     ours = {"SessionStart": f"{cmd} hook session-start", "UserPromptSubmit": f"{cmd} hook prompt",
             "Stop": f"{cmd} hook stop"}
@@ -223,9 +230,11 @@ def _merge_hooks(settings: dict, cmd: str) -> dict:
         if p not in allow:
             allow.append(p)
     deny = perm.setdefault("deny", [])
-    for p in DENY_READ:
+    for p in DENY_READ + (DENY_GIT if git_deny else []):
         if p not in deny:
             deny.append(p)
+    if not git_deny:
+        deny[:] = [p for p in deny if p not in DENY_GIT]
     return settings
 
 
@@ -240,7 +249,7 @@ def _remove_hooks(settings: dict) -> dict:
     if not settings.get("hooks"):
         settings.pop("hooks", None)
     perm = settings.get("permissions", {})
-    for key, ours in (("allow", SAFE_ALLOW + ["Bash(agentes:*)"]), ("deny", DENY_READ)):
+    for key, ours in (("allow", SAFE_ALLOW + ["Bash(agentes:*)"]), ("deny", DENY_READ + DENY_GIT)):
         lst = perm.get(key, [])
         for p in ours:
             if p in lst:
@@ -336,7 +345,8 @@ def sync(root: Path, quiet: bool = False, ides: list[str] | None = None) -> dict
                 write(f".claude/commands/{name}.md", render_command(name, c, team))
         settings_p = root / ".claude" / "settings.json"
         settings_p.parent.mkdir(exist_ok=True)
-        settings_p.write_text(json.dumps(_merge_hooks(_load_json(settings_p), cmd), indent=2, ensure_ascii=False) + "\n")
+        settings_p.write_text(json.dumps(_merge_hooks(_load_json(settings_p), cmd,
+                                                 team.get("settings", {}).get("git_bloqueado", True) is not False), indent=2, ensure_ascii=False) + "\n")
         mcp_p = root / ".mcp.json"
         mcp = _load_json(mcp_p)
         parts = cmd.split()

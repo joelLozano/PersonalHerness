@@ -576,6 +576,18 @@ def test_permisos_claude_restringidos(proj):
     assert perm.get("allow") == ["Bash(npm test:*)"] and "deny" not in perm
 
 
+def test_git_solo_lo_hace_el_usuario(proj):
+    sync(proj)
+    deny = json.loads((proj / ".claude/settings.json").read_text())["permissions"]["deny"]
+    assert {"Bash(git commit:*)", "Bash(git checkout -b:*)", "Bash(git switch -c:*)", "Bash(git push:*)"} <= set(deny)
+    for f in (".claude/agents/backend-dev.md", "CLAUDE.md"):
+        assert "NUNCA hagas commit" in (proj / f).read_text() or "hacen commit" in (proj / f).read_text()
+    (proj / ".agentes/team.local.yaml").write_text("settings:\n  git_bloqueado: false\n")
+    sync(proj, quiet=True)
+    deny = json.loads((proj / ".claude/settings.json").read_text())["permissions"]["deny"]
+    assert not any(p.startswith("Bash(git") for p in deny) and "Read(./.env)" in deny
+
+
 def test_personalizaciones_del_repo_requieren_aprobacion(proj, monkeypatch):
     from agentes.installer import load_team
     from agentes.security import mark_trusted

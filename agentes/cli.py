@@ -591,6 +591,9 @@ def cmd_agent(a):
         la.setdefault(name, {})["disabled"] = True
     elif a.action == "enable":
         la.setdefault(name, {}).pop("disabled", None)
+        # Si lo desactiva el equipo base o un perfil (p. ej. mobile), el local debe reactivarlo explícitamente.
+        if load_team(root, use_local=False).get("agents", {}).get(name, {}).get("disabled"):
+            la[name]["disabled"] = False
     elif a.action == "override":
         la[name] = deep_merge(agents.get(name, {}), la.get(name, {}))
     elif a.action == "reset":
