@@ -571,7 +571,8 @@ def relevant(cat: dict, query: str, platforms: list[str] | None = None, k: int =
 def usage_example(root: Path, name: str, ds_paths: list[str]) -> str | None:
     """Primer uso real del componente fuera del DS (git grep, barato)."""
     try:
-        out = subprocess.run(["git", "grep", "-n", "-m", "1", "-e", f"{name}(", "--", "*.swift", "*.kt"], cwd=root,
+        # sin -m/--max-count: no existe en git < 2.38
+        out = subprocess.run(["git", "grep", "-n", "-F", "-e", f"{name}(", "--", "*.swift", "*.kt"], cwd=root,
                              capture_output=True, text=True, timeout=5).stdout
     except Exception:
         return None
