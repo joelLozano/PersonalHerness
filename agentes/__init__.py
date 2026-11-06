@@ -1,2 +1,2 @@
 """Agentes: harness de equipo de desarrollo para Claude Code."""
-__version__ = "0.3.0"
+__version__ = "0.4.0"

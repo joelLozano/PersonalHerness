@@ -82,6 +82,7 @@ uv|requerido|0.4|uv --version|fn:uv|fn:uv|siempre|Gestor de Python; instala y a�
 claude|requerido|-|claude --version|fn:claude|fn:claude|siempre|Claude Code (orquestador del equipo)
 agentes|requerido|0.1.0|agentes --version|fn:agentes|fn:agentes|siempre|CLI del harness de agentes
 chromadb|recomendado|-|ver_chromadb|fn:chromadb|fn:chromadb|siempre|Base vectorial para la memoria semántica
+fastembed|recomendado|-|ver_fastembed|fn:chromadb|fn:chromadb|siempre|Embeddings multilingües (español) para la memoria
 python3|recomendado|3.10|python3 --version|brew:python@3.12|pkg:python3|siempre|Python del sistema (uv puede usar el suyo)
 gh|opcional|-|gh --version|brew:gh|pkg:gh|siempre|GitHub CLI (PRs e issues desde los agentes)
 node|requerido|18|node --version|brew:node|pkg:nodejs|package.json|Node.js (runtime de JavaScript)
@@ -108,6 +109,16 @@ EOF
 ver_xcode() {
   xcode-select -p >/dev/null 2>&1 || return 1
   pkgutil --pkg-info=com.apple.pkg.CLTools_Executables 2>/dev/null | awk '/^version/{print $2}' || echo "instalado"
+}
+agentes_py() {
+  local bin py
+  bin="$(command -v agentes)" || return 1
+  py="$(head -1 "$bin" | sed 's/^#![[:space:]]*//')"
+  case "$py" in *python*) echo "$py" ;; *) echo python3 ;; esac
+}
+ver_fastembed() {
+  local py; py="$(agentes_py)" || return 1
+  "$py" -c 'import importlib.metadata as m; print(m.version("fastembed"))' 2>/dev/null
 }
 ver_chromadb() {
   local bin py

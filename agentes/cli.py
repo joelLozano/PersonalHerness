@@ -58,7 +58,11 @@ def cmd_install(a):
         if not a.no_index:
             st = index_code(store, root)
             ok(f"Código indexado: {st['indexed']} archivos")
-    print(f"Memoria vectorial: {store.vector_status()}")
+    vs = store.vector_status()
+    print(f"Memoria vectorial: {vs}")
+    if vs.startswith("desactivado") and os.environ.get("AGENTES_NO_VECTORS") != "1":
+        print("   Se usa búsqueda por palabras clave (BM25). Cuando tengas conexión: `agentes memory rebuild`;"
+              " para comparar opciones: `agentes bench`.")
     print(f"""
 {C['b']}Siguiente paso{C['0']} → abre {'Claude Code (`claude`)' if 'claude' in res['ides'] else 'Kiro'} en el proyecto y ejecuta:
   {C['c']}/{'onboard' if existing else 'kickoff'}{C['0']}  {'(proyecto existente: contexto + preguntas)' if existing else '(proyecto nuevo: cuestionario de contexto)'}
@@ -468,8 +472,7 @@ def _recall(root: Path, data: dict) -> None:
     k = int(settings.get("auto_recall_k", 3))
     need = int(settings.get("auto_recall_min_overlap", 2))
     s = Store(root)
-    hits = s.search(prompt, ["rule", "decision", "convention", "design", "requirement", "bug", "security",
-                             "learning", "profile", "note"], k * 3)
+    kinds = ["decision", "convention", "design", "requirement", "bug", "security", "learning", "profile", "note"]
 
     def relevant(h) -> bool:
         overlap = len(terms & set(_re.findall(r"\w+", h["text"].lower())))
@@ -482,7 +485,10 @@ def _recall(root: Path, data: dict) -> None:
         state = {}
     sid = str(data.get("session_id") or "")
     seen = set(state.get(sid, [])) if sid else set()
-    picked = [h for h in hits if relevant(h) and h["id"] not in seen and h["kind"] != "rule"][:k]
+    # fase 1: palabras clave (instantáneo, no carga el modelo); fase 2: semántica solo si la 1 no encontró nada
+    picked = [h for h in s.search(prompt, kinds, k * 3, vectors=False) if relevant(h) and h["id"] not in seen][:k]
+    if not picked and settings.get("auto_recall_vectors", True):
+        picked = [h for h in s.search(prompt, kinds, k * 3) if relevant(h) and h["id"] not in seen][:k]
     if not picked:
         return
     print("Memorias relevantes (auto-recall):\n" + "\n".join(f"- [{h['kind']}#{h['id']}] {h['text'][:300]}" for h in picked))
@@ -496,6 +502,27 @@ def _recall(root: Path, data: dict) -> None:
             state_p.write_text(json.dumps(state))
         except OSError:
             pass
+
+
+def cmd_bench(a):
+    from . import bench
+    root = root_of(a)
+    modes = [m.strip() for m in a.modelos.split(",") if m.strip()]
+    if a.queries:
+        memories, cases = bench.project_cases(root, Path(a.queries))
+        origen = f"tus preguntas ({a.queries}) sobre {len(memories)} memorias del proyecto"
+        if not cases:
+            sys.exit("Ninguna pregunta coincidió con una memoria (revisa el campo expect).")
+    else:
+        memories, cases = bench.builtin_cases()
+        origen = f"conjunto de prueba en español ({len(memories)} memorias, {len(cases)} preguntas)"
+    print(f"Benchmark de búsqueda · {origen}\nModos: {', '.join(modes)} (la primera vez se descargan los modelos)\n")
+    results = bench.run(modes, memories, cases)
+    if a.json:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return
+    print(bench.table(results))
+    print(f"\n{C['b']}Recomendación:{C['0']} {bench.recommend(results)}")
 
 
 def cmd_mcp(a):
@@ -529,6 +556,11 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--yes", "-y", action="store_true", help="No pedir confirmación")
     x.add_argument("--restore", nargs="?", const="", metavar="FECHA", help="Deshacer una migración (default: la última)")
     x.add_argument("--backups", action="store_true", help="Listar respaldos de migración")
+    x = sp("bench", cmd_bench, "Compara BM25 vs búsqueda híbrida por modelo de embeddings (calidad, latencia, tokens)")
+    x.add_argument("--modelos", default="bm25,ingles,multilingue",
+                   help="Modos separados por coma: bm25, ingles, multilingue, multilingue-grande u otro modelo de fastembed")
+    x.add_argument("--queries", "-q", help="YAML con tus preguntas: [{query, expect: 'fragmento de la memoria'}]")
+    x.add_argument("--json", action="store_true")
     x = sp("ide", cmd_ide, "IDEs del proyecto: list | add <claude|kiro> | remove <claude|kiro>")
     x.add_argument("action", choices=["list", "add", "remove"])
     x.add_argument("name", nargs="?")

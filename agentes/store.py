@@ -104,7 +104,7 @@ def _hash(*parts: str) -> str:
 
 class Store:
     def __init__(self, root: str | os.PathLike | None = None, use_vectors: bool | None = None,
-                 embedding_function=None):
+                 embedding_function=None, embedding_model: str | None = None):
         self.root = find_root(root) if root is None else Path(root).resolve()
         self.dir = self.root / HARNESS_DIR
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -113,16 +113,43 @@ class Store:
         self.db.executescript(SCHEMA)
         self.db.commit()
         if use_vectors is None:
-            use_vectors = os.environ.get("AGENTES_NO_VECTORS") != "1"
+            use_vectors = embedding_function is not None or os.environ.get("AGENTES_NO_VECTORS") != "1"
         self._want_vectors = use_vectors
         self._ef = embedding_function
+        self._model_req = embedding_model
+        self.model_label = ""
         self._col = None
         self._vector_error: str | None = None
 
     # ------------------------------------------------------------------ vectores
+    FAIL_TTL = 3600  # tras un fallo de carga del modelo, usar solo BM25 durante 1 hora (sin reintentos lentos)
+
+    def _fail_marker(self) -> Path:
+        return self.dir / "vectors-error.json"
+
+    def _recent_failure(self, model: str) -> str | None:
+        try:
+            d = json.loads(self._fail_marker().read_text())
+            if d.get("model") == model and time.time() - d.get("ts", 0) < self.FAIL_TTL:
+                return d.get("error", "fallo reciente")
+        except Exception:
+            pass
+        return None
+
+    def clear_vector_failure(self) -> None:
+        try:
+            self._fail_marker().unlink()
+        except OSError:
+            pass
+
     @property
     def collection(self):
         if self._col is None and self._want_vectors and self._vector_error is None:
+            model_key = "personalizado" if self._ef is not None else (self._embedding_model_name() or "multilingue")
+            recent = None if self._ef is not None else self._recent_failure(model_key)
+            if recent:
+                self._vector_error = f"{recent} (reintento automático en <1 h; fuerza con `agentes memory rebuild`)"
+                return None
             try:
                 import chromadb  # type: ignore
                 from chromadb.config import Settings  # type: ignore
@@ -131,13 +158,50 @@ class Store:
                     path=str(self.dir / "vectors"),
                     settings=Settings(anonymized_telemetry=False),
                 )
-                kw = {"embedding_function": self._ef} if self._ef is not None else {}
-                col = client.get_or_create_collection("memories", metadata={"hnsw:space": "cosine"}, **kw)
+                from .embeddings import collection_name, make_ef
+                if self._ef is not None:
+                    ef, label = self._ef, "personalizado"
+                else:
+                    ef, label = make_ef(self._embedding_model_name())
+                self.model_label = label
+                kw = {"embedding_function": ef} if ef is not None else {}
+                col = client.get_or_create_collection(collection_name(label), metadata={"hnsw:space": "cosine"}, **kw)
                 col._embedding_function(["ping"])  # verifica que el modelo de embeddings funcione
                 self._col = col
+                self._backfill()
+                self.clear_vector_failure()
             except Exception as e:  # sin chromadb o sin modelo de embeddings
                 self._disable_vectors(e)
+                if self._ef is None and not isinstance(e, ImportError):
+                    try:
+                        self._fail_marker().write_text(json.dumps(
+                            {"model": model_key, "ts": time.time(), "error": self._vector_error}))
+                    except OSError:
+                        pass
         return self._col
+
+    def _embedding_model_name(self) -> str:
+        if self._model_req:
+            return self._model_req
+        if os.environ.get("AGENTES_EMBEDDING_MODEL"):
+            return os.environ["AGENTES_EMBEDDING_MODEL"]
+        try:
+            from .installer import load_team
+            return load_team(self.root).get("settings", {}).get("embedding_model") or ""
+        except Exception:
+            return ""
+
+    def _backfill(self) -> None:
+        """Al estrenar un modelo (colección vacía) vectoriza las memorias existentes (no el código)."""
+        col = self._col
+        if col is None or col.count() > 0:
+            return
+        rows = [dict(r) for r in self.db.execute(
+            "SELECT id,kind,text,tags,source FROM memories WHERE kind != 'code'")]
+        for i in range(0, len(rows), 100):
+            b = rows[i:i + 100]
+            col.upsert(ids=[str(r["id"]) for r in b], documents=[r["text"] for r in b],
+                       metadatas=[{"kind": r["kind"], "source": r["source"] or "", "tags": r["tags"] or ""} for r in b])
 
     def _disable_vectors(self, e: Exception) -> None:
         self._vector_error = f"{type(e).__name__}: {str(e)[:200]}"
@@ -150,7 +214,7 @@ class Store:
     def vector_status(self) -> str:
         col = self.collection
         if col is not None:
-            return f"chromadb OK ({col.count()} vectores)"
+            return f"chromadb OK · modelo {self.model_label} · {col.count()} vectores (el código usa solo BM25)"
         return f"desactivado ({self._vector_error or 'AGENTES_NO_VECTORS=1'}) -> solo BM25"
 
     # ------------------------------------------------------------------ memorias
@@ -171,7 +235,7 @@ class Store:
             row = self.db.execute("SELECT id FROM memories WHERE hash=?", (h,)).fetchone()
             return row["id"] if row else None
         mid = cur.lastrowid
-        if _vector and self.collection is not None:
+        if _vector and kind != "code" and self.collection is not None:
             try:
                 self.collection.upsert(
                     ids=[str(mid)], documents=[text],
@@ -183,7 +247,7 @@ class Store:
 
     def add_many(self, items: list[dict]) -> list[int]:
         """Inserción masiva (usada por el indexador de código)."""
-        ids, docs, metas = [], [], []
+        ids, vids, docs, metas = [], [], [], []
         now = time.time()
         for it in items:
             text = it["text"].strip()
@@ -198,13 +262,15 @@ class Store:
             mid = cur.lastrowid if cur.rowcount else self.db.execute(
                 "SELECT id FROM memories WHERE hash=?", (h,)).fetchone()["id"]
             ids.append(mid)
-            docs.append(text)
-            metas.append({"kind": kind, "source": source, "tags": tags})
+            if kind != "code":  # el código se busca con BM25 (exacto); los vectores son para lenguaje natural
+                vids.append(mid)
+                docs.append(text)
+                metas.append({"kind": kind, "source": source, "tags": tags})
         self.db.commit()
-        if ids and self.collection is not None:
+        if vids and self.collection is not None:
             try:
-                for i in range(0, len(ids), 200):
-                    self.collection.upsert(ids=[str(x) for x in ids[i:i + 200]],
+                for i in range(0, len(vids), 200):
+                    self.collection.upsert(ids=[str(x) for x in vids[i:i + 200]],
                                            documents=docs[i:i + 200], metadatas=metas[i:i + 200])
             except Exception as e:
                 self._disable_vectors(e)
@@ -242,6 +308,8 @@ class Store:
             return []
 
     def _vec(self, query: str, kinds: list[str] | None, k: int) -> list[int]:
+        if kinds and all(x == "code" for x in kinds):
+            return []  # el código no se vectoriza: no cargar el modelo
         col = self.collection
         if col is None or col.count() == 0:
             return []
@@ -255,12 +323,14 @@ class Store:
             self._disable_vectors(e)
             return []
 
-    def search(self, query: str, kinds: list[str] | str | None = None, k: int = 8) -> list[dict]:
+    def search(self, query: str, kinds: list[str] | str | None = None, k: int = 8,
+               vectors: bool = True) -> list[dict]:
         if isinstance(kinds, str):
             kinds = [x.strip() for x in kinds.split(",") if x.strip()]
         pool = max(k * 3, 20)
         scores: dict[int, float] = {}
-        vec, fts = self._vec(query, kinds, pool), self._fts(query, kinds, pool)
+        vec = self._vec(query, kinds, pool) if vectors else []
+        fts = self._fts(query, kinds, pool)
         for ranking in (vec, fts):
             for rank, mid in enumerate(ranking):
                 scores[mid] = scores.get(mid, 0.0) + 1.0 / (60 + rank)
@@ -424,18 +494,15 @@ class Store:
         return {"memories": n, "tasks": t}
 
     def rebuild_vectors(self) -> int:
+        self.clear_vector_failure()
+        self._vector_error = None
         """Re-genera la base vectorial desde SQLite (tras cambiar modelo o corrupción)."""
         if self.collection is None:
             return 0
-        self._client.delete_collection("memories")
+        self._client.delete_collection(self._col.name)
         self._col = None
-        rows = [dict(r) for r in self.db.execute("SELECT id,kind,text,tags,source FROM memories")]
-        col = self.collection
-        for i in range(0, len(rows), 200):
-            b = rows[i:i + 200]
-            col.upsert(ids=[str(r["id"]) for r in b], documents=[r["text"] for r in b],
-                       metadatas=[{"kind": r["kind"], "source": r["source"] or "", "tags": r["tags"] or ""} for r in b])
-        return len(rows)
+        col = self.collection  # se recrea vacía y _backfill la llena
+        return col.count() if col is not None else 0
 
 
 def dumps(obj: Any) -> str:

@@ -380,6 +380,18 @@ commands:
       Busca con `memory_search` (sin filtro y luego kinds=code si hace falta): $ARGUMENTS
       Resume lo encontrado citando ids de memoria y archivos.
 
+  bench:
+    description: Mide si la búsqueda vectorial mejora la memoria de ESTE proyecto (genera preguntas y ejecuta agentes bench)
+    body: |
+      Evalúa la búsqueda de memoria con preguntas realistas del proyecto.
+      1. Con `memory_list` toma hasta 20 memorias variadas (decisiones, convenciones, diseño, requisitos, bugs).
+      2. Escribe `.agentes/bench.yaml` con dos preguntas por memoria, como las haría alguien del equipo:
+         una con palabras distintas a las de la memoria (paráfrasis, tipo: parafrasis) y otra en inglés (tipo: ingles).
+         Formato: `- {query: "...", expect: "fragmento literal y único de la memoria", tipo: parafrasis}`.
+      3. Ejecuta `agentes bench --queries .agentes/bench.yaml` y muestra la tabla y la recomendación.
+      4. Si conviene cambiar de modelo, indica el ajuste (`settings.embedding_model` en `.agentes/team.local.yaml`
+         y luego `agentes memory rebuild`), o `./install.sh --lite` si BM25 basta. No cambies nada sin confirmación.
+
   retro:
     description: Retrospectiva - consolida aprendizajes y propone mejoras al harness para este proyecto
     argument-hint: "[feature o periodo]"
@@ -478,6 +490,10 @@ orchestrator: |
 
 # Ajustes de los hooks.
 settings:
+  # Modelo de embeddings: multilingue (por defecto, ~220 MB) | multilingue-grande (~1 GB) | ingles (~80 MB)
+  # o cualquier modelo de fastembed. Tras cambiarlo: `agentes memory rebuild`. Compara con `agentes bench`.
+  embedding_model: multilingue
+  auto_recall_vectors: true  # si las palabras clave no encuentran nada, intenta búsqueda semántica (carga el modelo)
   auto_recall: true          # inyecta memorias relevantes en cada prompt
   auto_recall_k: 3            # máximo de memorias por mensaje (no se repiten en la misma sesión)
   auto_recall_min_chars: 20   # ignora mensajes cortos ("sí", "continúa"...)
@@ -511,7 +527,7 @@ kiro:
       Bugs delicados → `agentes-bugfix`; auditoría → `agentes-security-audit`. (Si Workflows está apagado, usa /feature.)
     - Los sub-agentes no ven las Specs: pásales rutas y un resumen, no conversaciones completas.
     Guarda conocimiento con `memory_add` (no crees .md de notas). Respeta la clave de perfil `autonomia`.
-    Comandos: /kickoff /onboard /feature /plan /implement /review /test /security /design /fix /tasks /remember /recall /retro
+    Comandos: /kickoff /onboard /feature /plan /implement /review /test /security /design /fix /tasks /remember /recall /retro /bench
 
   # Texto que se antepone a algunos comandos en Kiro (aprovechan Specs/Workflows).
   command_notes:

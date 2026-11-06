@@ -1,6 +1,6 @@
 # agentes: un equipo de desarrollo para Claude Code y Kiro
 
-`agentes` instala en cualquier proyecto (para Claude Code, Kiro o ambos) un equipo de 10 agentes con 14 flujos de trabajo (comandos slash), una memoria persistente con búsqueda vectorial y un tablero de tareas. Todo se define en un solo archivo (`agentes/team.yaml`). La memoria se guarda en una base de datos dentro del proyecto, no en archivos `.md`.
+`agentes` instala en cualquier proyecto (para Claude Code, Kiro o ambos) un equipo de 10 agentes con 15 flujos de trabajo (comandos slash), una memoria persistente con búsqueda vectorial y un tablero de tareas. Todo se define en un solo archivo (`agentes/team.yaml`). La memoria se guarda en una base de datos dentro del proyecto, no en archivos `.md`.
 
 ```
 Tú ─► Claude Code (orquestador)
@@ -68,6 +68,7 @@ Si prefieres responder en la terminal: `agentes kickoff`.
 | `/tasks` | Tablero de tareas |
 | `/remember <x>` · `/recall <q>` | Guardar o buscar en la memoria |
 | `/retro` | Consolida la memoria y propone mejoras al harness para ese proyecto |
+| `/bench` | Mide si la búsqueda vectorial mejora la memoria de tu proyecto, con preguntas sobre tus propias memorias |
 
 ## 3. Kiro: Specs, sub-agentes y Workflows
 
@@ -166,7 +167,35 @@ Hábitos que también ayudan:
 ## 5. Memoria y contexto
 
 - **Una base de datos por proyecto** (`.agentes/agentes.db`), con estos tipos de memoria: `rule` (reglas siempre presentes), `decision`, `convention`, `design`, `requirement`, `bug`, `security`, `learning`, `profile`, `scan`, `code`, `spec` (specs de Kiro) y `note`.
-- **Búsqueda híbrida**: combina vectores (ChromaDB) con BM25 (SQLite FTS5) mediante Reciprocal Rank Fusion. Encuentra tanto por significado como por nombres exactos de funciones o variables. Si ChromaDB no está disponible, sigue funcionando solo con BM25.
+- **Búsqueda híbrida**: combina vectores (ChromaDB) con BM25 (SQLite FTS5) mediante Reciprocal Rank Fusion.
+  - BM25 encuentra las palabras exactas, como nombres de funciones o términos.
+  - Los vectores encuentran por significado: paráfrasis y preguntas en otro idioma.
+  - El **código** se busca solo con BM25, que es exacto y no necesita cargar el modelo. Los vectores quedan para memorias y specs.
+  - Si no hay vectores, todo sigue funcionando con BM25. Si el modelo no se puede descargar, se recuerda el fallo durante una hora para no reintentar en cada mensaje.
+
+### ¿Me conviene la búsqueda vectorial?
+La memoria en base de datos ya ahorra tokens frente a los `.md` siempre cargados, con o sin vectores. Los vectores mejoran *qué* se encuentra cuando la pregunta no usa las mismas palabras que la memoria. En el conjunto de prueba incluido, BM25 acierta el **100% de las preguntas literales**, pero solo el **15% de las paráfrasis** y el **17% de las preguntas en inglés**. Ese hueco es lo que pueden cubrir los vectores. Mídelo en tu máquina:
+
+```bash
+agentes bench                                  # BM25 vs inglés vs multilingüe con el conjunto de prueba en español
+agentes bench --modelos bm25,multilingue,multilingue-grande
+/bench                                         # en Claude Code o Kiro: el equipo escribe preguntas sobre TUS memorias y lo ejecuta
+agentes bench --queries .agentes/bench.yaml    # tus propias preguntas: [{query, expect: "fragmento de la memoria"}]
+```
+La tabla muestra para cada modo:
+- **Acierto@1 y acierto@3:** cuántas veces la memoria correcta sale primera o entre las tres primeras.
+- **MRR** y el **acierto por tipo de pregunta** (literal, paráfrasis, inglés).
+- **Latencia, tiempo de carga del modelo y tokens devueltos.**
+
+Al final da una recomendación. Si BM25 rinde casi igual, te sugiere `./install.sh --lite`.
+
+| `settings.embedding_model` | Modelo | Tamaño | Idiomas |
+|---|---|---|---|
+| `multilingue` (por defecto) | paraphrase-multilingual-MiniLM-L12-v2 (fastembed) | ~220 MB | ~50, incluido español |
+| `multilingue-grande` | paraphrase-multilingual-mpnet-base-v2 (fastembed) | ~1 GB | ~50, más preciso y más lento |
+| `ingles` | all-MiniLM-L6-v2 (por defecto de ChromaDB) | ~80 MB | Inglés |
+
+Si cambias el modelo, ejecuta `agentes memory rebuild`. Cada modelo tiene su propia colección, que se rellena sola con las memorias existentes. El modelo se descarga una vez durante `agentes install`; el servidor MCP lo mantiene cargado, y el auto-recall solo lo usa si la búsqueda por palabras clave no encontró nada.
 - **Contexto automático**: al iniciar cada sesión se inyecta el perfil, el stack, las decisiones, las convenciones, el diseño y las tareas abiertas. En cada prompt se añaden las memorias más relevantes (auto-recall).
 - **Protocolo común**: todos los agentes leen el contexto antes de trabajar y guardan solo conocimiento durable al terminar.
 - **Compartir con tu equipo**: la base de datos no se sube a git. Usa `agentes memory export` para generar `.agentes/memory.json` y súbelo; quien lo reciba ejecuta `agentes memory import`.
@@ -240,7 +269,8 @@ agentes memory search "cómo manejamos auth" [-k decision] [-n 5]
 agentes memory add "Precios en centavos" -k convention
 agentes memory list [-k decision] · delete <ids> · stats · kinds
 agentes memory profile [clave valor --tags seccion]   # ver o editar el perfil
-agentes memory export [archivo] · import [archivo] · rebuild
+agentes memory export [archivo] · import [archivo] · rebuild   # rebuild: re-vectorizar (tras cambiar de modelo)
+agentes bench [--modelos bm25,ingles,multilingue] [--queries archivo.yaml]   # ¿conviene la búsqueda vectorial?
 agentes task add "Paginar productos" -a backend-dev -p alta -f catalogo
 agentes task list [--all] [-s doing] · set <id> <estado> [nota] · done <ids> · show <id>
 ```
@@ -263,6 +293,8 @@ agentes/
   installer.py     # genera .claude/* , hooks, .mcp.json y el bloque de CLAUDE.md (sin pisar lo tuyo)
   kiro.py          # genera .kiro/agents, steering, hooks v1, mcp.json y recetas de workflows
   migrate.py       # detección, migración a la BD, respaldo y restauración de configuraciones previas
+  embeddings.py    # modelos de embeddings (multilingüe con fastembed, inglés de ChromaDB)
+  bench.py         # benchmark BM25 vs búsqueda híbrida
   store.py         # memoria: SQLite + FTS5 + ChromaDB (híbrida), perfil, tareas
   scanner.py       # análisis de proyectos existentes + indexado incremental de código
   mcp_server.py    # servidor MCP sin dependencias (memory_*, profile_*, task_*, project_context)

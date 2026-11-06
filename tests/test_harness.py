@@ -216,3 +216,49 @@ def test_memory_search_compact(proj):
     out = m._search("computeTotal order", "code")
     assert out.count("[code]") == 5 and len(out) < 3500 and "src/f" in out
     assert len(m._search("computeTotal order", "code", full=True)) > len(out)
+
+
+class CountingEF(FakeEF):
+    calls = 0
+
+    def __call__(self, input):
+        CountingEF.calls += 1
+        return super().__call__(input)
+
+
+def test_vectores_selectivos_y_relleno(proj):
+    pytest.importorskip("chromadb")
+    s = Store(proj, embedding_function=FakeEF())
+    s.add("los precios van en centavos", "convention")
+    s.add_many([{"text": "// a.ts:1\nconst x = 1", "kind": "code", "source": "a.ts:1"},
+                {"text": "// .kiro/specs/x/requirements.md:1\nEl usuario puede pagar", "kind": "spec", "source": "s:1"}])
+    assert s.collection.count() == 2                      # memoria + spec; el código no se vectoriza
+    assert s.search("const", "code")                      # el código se encuentra por BM25
+    s2 = Store(proj, embedding_function=CountingEF())     # otro modelo → otra colección, se rellena sola
+    s2._ef.name = lambda: "otro"
+    assert s2.collection is not None and s2.collection.count() >= 2
+    CountingEF.calls = 0
+    s3 = Store(proj, embedding_function=CountingEF())
+    s3.search("const x", "code")
+    assert CountingEF.calls == 0                          # buscar código no carga el modelo
+    s3.search("precios centavos", vectors=False)
+    assert CountingEF.calls == 0
+
+
+def test_bench(proj, tmp_path):
+    from agentes import bench
+    memories, cases = bench.builtin_cases()
+    assert len(cases) == 2 * len(bench.DATASET) + len(bench.ENGLISH)
+    res = bench.run(["bm25"], memories, cases)
+    assert res[0]["por_tipo"]["literal"] > res[0]["por_tipo"]["paráfrasis"]  # BM25 falla con paráfrasis
+    assert "Solo se pudo medir BM25" in bench.recommend(res + [{"modo": "multilingue", "error": "x"}])
+    if pytest.importorskip("chromadb"):
+        r = bench.run_mode("fake", memories, cases, ef=FakeEF())
+        assert "error" not in r and 0 <= r["mrr"] <= 1
+    s = Store(proj, use_vectors=False)
+    s.add("Los montos se guardan en centavos", "convention")
+    q = tmp_path / "q.yaml"
+    q.write_text("- {query: '¿cómo guardamos el dinero?', expect: 'en centavos', tipo: parafrasis}\n"
+                 "- {query: 'no existe', expect: 'zzz'}\n")
+    mem, cs = bench.project_cases(proj, q)
+    assert len(cs) == 1 and mem[cs[0]["expect"]].startswith("Los montos")
