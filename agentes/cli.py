@@ -1,0 +1,457 @@
+"""CLI `agentes`: instala y gestiona el equipo de agentes en cualquier proyecto."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import yaml
+
+from . import __version__
+from .installer import (BASE_TEAM, deep_merge, load_team, local_team_path, render_agent, render_questions,
+                        sync, uninstall)
+from .store import HARNESS_DIR, KINDS, TASK_STATUSES, Store, dumps, find_root
+
+C = {"b": "\033[1m", "g": "\033[32m", "y": "\033[33m", "r": "\033[31m", "c": "\033[36m", "0": "\033[0m"}
+if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+    C = {k: "" for k in C}
+
+
+def ok(msg):
+    print(f"{C['g']}✔{C['0']} {msg}")
+
+
+def warn(msg):
+    print(f"{C['y']}!{C['0']} {msg}")
+
+
+def root_of(args) -> Path:
+    return Path(args.path).resolve() if getattr(args, "path", None) else find_root()
+
+
+# ----------------------------------------------------------------------------- instalación
+def cmd_install(a):
+    root = Path(a.path or ".").resolve()
+    if not root.is_dir():
+        sys.exit(f"No existe {root}")
+    res = sync(root)
+    ok(f"Harness instalado en {root}: {res['agents']} agentes, {res['commands']} comandos")
+    store = Store(root)
+    existing = any((root / m).exists() for m in ("package.json", "pyproject.toml", "go.mod", "Cargo.toml",
+                                                 "requirements.txt", "pom.xml", "Gemfile", "composer.json", "src"))
+    if existing and not a.no_scan:
+        from .scanner import index_code, save_scan, scan
+        print("Proyecto existente detectado → escaneando…")
+        r = scan(root)
+        save_scan(store, r)
+        ok(f"Escaneo guardado ({', '.join(r.get('frameworks', [])[:6]) or 'stack no detectado'})")
+        if not a.no_index:
+            st = index_code(store, root)
+            ok(f"Código indexado: {st['indexed']} archivos")
+    print(f"Memoria vectorial: {store.vector_status()}")
+    print(f"""
+{C['b']}Siguiente paso{C['0']} → abre Claude Code en el proyecto (`claude`) y ejecuta:
+  {C['c']}/{'onboard' if existing else 'kickoff'}{C['0']}  {'(proyecto existente: contexto + preguntas)' if existing else '(proyecto nuevo: cuestionario de contexto)'}
+Personaliza el equipo en .agentes/team.local.yaml y aplica con `agentes sync`.""")
+
+
+def cmd_sync(a):
+    root = root_of(a)
+    if not (root / HARNESS_DIR).exists():
+        sys.exit("Este proyecto no tiene el harness. Ejecuta `agentes install`.")
+    res = sync(root)
+    ok(f"Sincronizado: {res['agents']} agentes, {res['commands']} comandos")
+
+
+def cmd_uninstall(a):
+    root = root_of(a)
+    removed = uninstall(root, purge=a.purge)
+    ok(f"Desinstalado ({len(removed)} archivos). " + ("Memoria eliminada." if a.purge else
+                                                         "La memoria (.agentes/) se conserva; usa --purge para borrarla."))
+
+
+def cmd_doctor(a):
+    root = root_of(a)
+    print(f"agentes {__version__}  ·  python {sys.version.split()[0]}  ·  proyecto: {root}")
+    checks = [
+        ("CLI en PATH", bool(shutil.which("agentes"))),
+        ("claude (Claude Code) en PATH", bool(shutil.which("claude"))),
+        ("git", bool(shutil.which("git"))),
+        (".agentes/ instalado", (root / HARNESS_DIR).exists()),
+        (".mcp.json con servidor agentes", '"agentes"' in (root / ".mcp.json").read_text() if (root / ".mcp.json").exists() else False),
+        ("hooks en .claude/settings.json", "hook session-start" in (root / ".claude/settings.json").read_text() if (root / ".claude/settings.json").exists() else False),
+    ]
+    try:
+        import chromadb  # noqa
+        checks.append(("chromadb instalado (vectores)", True))
+    except Exception:
+        checks.append(("chromadb instalado (vectores) – opcional, usa BM25 si falta", False))
+    for name, good in checks:
+        print(f"  {'✔' if good else '✘'} {name}")
+    if (root / HARNESS_DIR).exists():
+        s = Store(root)
+        print(dumps(s.stats()))
+    # prueba MCP
+    try:
+        p = subprocess.run([sys.executable, "-m", "agentes", "mcp"], input=json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n", capture_output=True, text=True,
+            timeout=30, cwd=root)
+        n = len(json.loads(p.stdout.splitlines()[0])["result"]["tools"])
+        print(f"  ✔ servidor MCP responde ({n} herramientas)")
+    except Exception as e:
+        print(f"  ✘ servidor MCP: {e}")
+
+
+# ----------------------------------------------------------------------------- contexto
+def cmd_scan(a):
+    from .scanner import report_to_text, save_scan, scan
+    root = root_of(a)
+    r = scan(root)
+    if not a.no_save:
+        save_scan(Store(root), r)
+    print(json.dumps(r, ensure_ascii=False, indent=2) if a.json else report_to_text(r))
+
+
+def cmd_index(a):
+    from .scanner import index_code
+    root = root_of(a)
+    s = Store(root)
+    if a.rebuild:
+        s.db.execute("DELETE FROM files")
+        s.delete([r[0] for r in s.db.execute("SELECT id FROM memories WHERE kind='code'")])
+    st = index_code(s, root, progress=lambda n, t: print(f"  {n}/{t}…", end="\r"))
+    ok(f"Indexado: {st}  ·  vectores: {s.vector_status()}")
+
+
+def cmd_context(a):
+    print(Store(root_of(a)).context_summary(a.max))
+
+
+def cmd_questions(a):
+    team = load_team(root_of(a))
+    print(render_questions(team["questions"][a.kind]))
+
+
+def cmd_kickoff(a):
+    """Cuestionario interactivo en terminal (alternativa a /kickoff dentro de Claude)."""
+    root = root_of(a)
+    s = Store(root)
+    team = load_team(root)
+    current = {k: v for sec in s.profile_get().values() for k, v in sec.items()}
+    print(f"{C['b']}Cuestionario ({a.kind}). Enter = mantener/omitir.{C['0']}")
+    for sec in team["questions"][a.kind]:
+        print(f"\n{C['c']}== {sec.get('title', sec['section'])} =={C['0']}")
+        for q in sec["items"]:
+            opts = q.get("opts") or []
+            hint = "".join(f"\n    {i + 1}) {o}" for i, o in enumerate(opts))
+            cur = current.get(q["id"])
+            ans = input(f"• {q['q']}{hint}\n  {('[' + cur + '] ') if cur else ''}> ").strip()
+            if ans.isdigit() and opts and 1 <= int(ans) <= len(opts):
+                ans = str(opts[int(ans) - 1])
+            if ans:
+                s.profile_set(q["id"], ans, sec["section"])
+    ok("Perfil guardado. En Claude Code ejecuta /kickoff para que el equipo genere requisitos, diseño y backlog.")
+
+
+# ----------------------------------------------------------------------------- memoria
+def cmd_memory(a):
+    s = Store(root_of(a))
+    if a.action == "search":
+        for r in s.search(" ".join(a.args), a.kind, a.k):
+            print(f"{C['c']}#{r['id']} [{r['kind']}]{C['0']} {r['source']} (score {r['score']})\n{r['text'][:600]}\n")
+    elif a.action == "add":
+        print(f"Guardado #{s.add(' '.join(a.args), a.kind or 'note', a.tags or '', agent='usuario')}")
+    elif a.action == "list":
+        for r in s.list(a.kind, a.k):
+            print(f"#{r['id']} [{r['kind']}] {r['text'][:200]}")
+    elif a.action == "delete":
+        print(f"Eliminadas: {s.delete([int(x) for x in a.args])}")
+    elif a.action == "stats":
+        print(dumps(s.stats()))
+    elif a.action == "export":
+        out = Path(a.args[0]) if a.args else s.dir / "memory.json"
+        out.write_text(dumps(s.export()))
+        ok(f"Exportado a {out} (versionable en git para compartir con el equipo)")
+    elif a.action == "import":
+        src = Path(a.args[0]) if a.args else s.dir / "memory.json"
+        print(s.import_(json.loads(src.read_text())))
+    elif a.action == "rebuild":
+        ok(f"Vectores regenerados: {s.rebuild_vectors()}")
+    elif a.action == "profile":
+        if len(a.args) >= 2:
+            s.profile_set(a.args[0], " ".join(a.args[1:]), a.tags or "")
+        print(dumps(s.profile_get()))
+    elif a.action == "kinds":
+        for k, v in KINDS.items():
+            print(f"  {k:12} {v}")
+
+
+# ----------------------------------------------------------------------------- tareas
+def cmd_task(a):
+    s = Store(root_of(a))
+    if a.action == "add":
+        print(f"Tarea #{s.task_create(' '.join(a.args), assignee=a.assignee or '', priority=a.priority, feature=a.feature or '')}")
+    elif a.action in ("list", "ls"):
+        rows = s.task_list(a.status, a.feature, a.all)
+        for t in rows:
+            print(f"#{t['id']:<4} {t['status']:<8} {t['priority']:<5} {t['title'][:70]:<70} {t['assignee']}")
+        if not rows:
+            print("Sin tareas.")
+    elif a.action == "set":
+        tid, status = int(a.args[0]), a.args[1]
+        print(s.task_update(tid, status=status, notes=" ".join(a.args[2:]) or None))
+    elif a.action == "done":
+        for tid in a.args:
+            s.task_update(int(tid), status="done")
+        ok("Hecho.")
+    elif a.action == "show":
+        print(dumps(s.task_update(int(a.args[0]))))
+
+
+# ----------------------------------------------------------------------------- equipo
+def _load_local(root: Path) -> dict:
+    p = local_team_path(root)
+    return (yaml.safe_load(p.read_text()) or {}) if p.exists() else {}
+
+
+def _save_local(root: Path, data: dict):
+    p = local_team_path(root)
+    p.parent.mkdir(exist_ok=True)
+    header = "# Personalización del equipo para este proyecto. Aplica con: agentes sync\n"
+    p.write_text(header + yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=110))
+
+
+def _editor(path: Path):
+    ed = os.environ.get("VISUAL") or os.environ.get("EDITOR") or ("code -w" if shutil.which("code") else "nano")
+    subprocess.call(f'{ed} "{path}"', shell=True)
+
+
+def cmd_agent(a):
+    root = root_of(a)
+    team = load_team(root)
+    agents = team.get("agents", {})
+    local = _load_local(root)
+    la = local.setdefault("agents", {})
+    if a.action == "list":
+        for n, d in agents.items():
+            flag = " (desactivado)" if d.get("disabled") else (" (personalizado)" if n in la else "")
+            print(f"  {C['b']}{n:18}{C['0']} {d.get('model', 'inherit'):7} {d.get('description', '')[:85]}{flag}")
+        return
+    name = a.name
+    if a.action == "show":
+        print(render_agent(name, agents[name], team))
+        return
+    if a.action == "add":
+        la[name] = {"description": a.description or f"Agente {name}", "model": a.model or "sonnet",
+                    "tools": a.tools or "full", "prompt": a.prompt or f"Eres {name}. Describe aquí su rol."}
+    elif a.action == "extend":
+        la.setdefault(name, {})["extra_prompt"] = ((la.get(name, {}).get("extra_prompt") or "") + "\n" + a.text).strip()
+    elif a.action == "model":
+        la.setdefault(name, {})["model"] = a.text
+    elif a.action == "disable":
+        la.setdefault(name, {})["disabled"] = True
+    elif a.action == "enable":
+        la.setdefault(name, {}).pop("disabled", None)
+    elif a.action == "override":
+        la[name] = deep_merge(agents.get(name, {}), la.get(name, {}))
+    elif a.action == "reset":
+        la.pop(name, None)
+    elif a.action == "remove":
+        if name in yaml.safe_load(BASE_TEAM.read_text())["agents"]:
+            la.setdefault(name, {})["disabled"] = True
+        else:
+            la.pop(name, None)
+    _save_local(root, local)
+    if a.action in ("add", "override"):
+        _editor(local_team_path(root)) if a.edit else None
+    if (root / HARNESS_DIR).exists():
+        sync(root, quiet=True)
+    ok(f"Agente '{name}': {a.action} aplicado y sincronizado")
+
+
+def cmd_command(a):
+    root = root_of(a)
+    team = load_team(root)
+    local = _load_local(root)
+    lc = local.setdefault("commands", {})
+    if a.action == "list":
+        for n, c in team.get("commands", {}).items():
+            print(f"  /{n:12} {c.get('description', '')[:95]}{' (desactivado)' if c.get('disabled') else ''}")
+        return
+    if a.action == "add":
+        lc[a.name] = {"description": a.description or a.name, "body": a.body or "$ARGUMENTS"}
+    elif a.action == "disable":
+        lc.setdefault(a.name, {})["disabled"] = True
+    elif a.action == "reset":
+        lc.pop(a.name, None)
+    _save_local(root, local)
+    sync(root, quiet=True)
+    ok(f"Comando /{a.name}: {a.action}")
+
+
+def cmd_team(a):
+    root = root_of(a)
+    if a.action == "path":
+        print(f"base : {BASE_TEAM}\nlocal: {local_team_path(root)}")
+    elif a.action == "edit":
+        _editor(local_team_path(root) if not a.base else BASE_TEAM)
+        if (root / HARNESS_DIR).exists():
+            sync(root, quiet=True)
+            ok("Sincronizado")
+    elif a.action == "export":
+        print(yaml.safe_dump(load_team(root), allow_unicode=True, sort_keys=False, width=110))
+    elif a.action == "validate":
+        team = load_team(root)
+        errs = []
+        for n, d in team.get("agents", {}).items():
+            for k in ("description", "prompt"):
+                if not d.get("disabled") and not d.get(k):
+                    errs.append(f"agente {n}: falta '{k}'")
+        for n, c in team.get("commands", {}).items():
+            if not c.get("disabled") and not c.get("body"):
+                errs.append(f"comando {n}: falta 'body'")
+        print("\n".join(errs) if errs else "team válido ✔")
+
+
+# ----------------------------------------------------------------------------- hooks
+def cmd_hook(a):
+    """Hooks de Claude Code. Nunca deben romper la sesión: siempre exit 0."""
+    try:
+        raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+        data = json.loads(raw) if raw.strip() else {}
+        root = find_root(data.get("cwd"))
+        if not (root / HARNESS_DIR).exists():
+            return
+        if a.event == "session-start":
+            s = Store(root, use_vectors=False)
+            print("# Contexto del proyecto (memoria del equipo `agentes`)\n" + s.context_summary())
+        elif a.event == "prompt":
+            settings = load_team(root).get("settings", {})
+            prompt = (data.get("prompt") or "").strip()
+            if not settings.get("auto_recall", True) or len(prompt) < settings.get("auto_recall_min_chars", 20):
+                return
+            s = Store(root)
+            hits = [h for h in s.search(prompt, ["decision", "convention", "design", "requirement", "bug",
+                                                 "security", "learning", "profile", "note"],
+                                        settings.get("auto_recall_k", 4))]
+            if hits:
+                print("Memorias relevantes del proyecto (auto-recall):\n" +
+                      "\n".join(f"- [{h['kind']}#{h['id']}] {h['text'][:350]}" for h in hits))
+    except Exception as e:  # pragma: no cover
+        print(f"(agentes hook: {e})", file=sys.stderr)
+
+
+def cmd_requisitos(a):
+    """Ejecuta requisitos.sh (bash) para revisar/instalar el software necesario."""
+    script = Path(__file__).parent / "requisitos.sh"
+    root = root_of(a)
+    extra = [x for x in a.extra if x != "--"]
+    if "--proyecto" not in extra and "-p" not in extra:
+        extra = ["--proyecto", str(root)] + extra
+    sys.exit(subprocess.call(["bash", str(script), *extra]))
+
+
+def cmd_mcp(a):
+    from .mcp_server import serve
+    serve()
+
+
+# ----------------------------------------------------------------------------- parser
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="agentes", description="Harness de equipo de desarrollo para Claude Code")
+    p.add_argument("--version", action="version", version=f"agentes {__version__}")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def sp(name, fn, help_):
+        x = sub.add_parser(name, help=help_)
+        x.set_defaults(fn=fn)
+        x.add_argument("--path", "-C", help="Ruta del proyecto (default: actual)")
+        return x
+
+    x = sp("install", cmd_install, "Instala el harness en un proyecto (nuevo o existente)")
+    x.add_argument("target", nargs="?", help="Ruta (default: .)")
+    x.add_argument("--no-scan", action="store_true")
+    x.add_argument("--no-index", action="store_true")
+    sp("sync", cmd_sync, "Regenera agentes/comandos/hooks desde team.yaml + team.local.yaml")
+    x = sp("uninstall", cmd_uninstall, "Quita el harness del proyecto")
+    x.add_argument("--purge", action="store_true", help="Borra también la memoria (.agentes/)")
+    sp("doctor", cmd_doctor, "Diagnóstico de la instalación")
+    x = sp("requisitos", cmd_requisitos, "Revisa el software necesario (harness + proyecto) e instala lo que falte (s/n)")
+    x.add_argument("extra", nargs=argparse.REMAINDER, help="--check | --yes | --solo-requeridos | --lista")
+
+    x = sp("scan", cmd_scan, "Analiza el proyecto (stack, scripts, git, deuda) y lo guarda en memoria")
+    x.add_argument("--json", action="store_true")
+    x.add_argument("--no-save", action="store_true")
+    x = sp("index", cmd_index, "Indexa el código en la memoria vectorial (incremental)")
+    x.add_argument("--rebuild", action="store_true")
+    x = sp("context", cmd_context, "Muestra el resumen de contexto que reciben los agentes")
+    x.add_argument("--max", type=int, default=6000)
+    x = sp("questions", cmd_questions, "Muestra el cuestionario")
+    x.add_argument("kind", nargs="?", default="new", choices=["new", "existing"])
+    x = sp("kickoff", cmd_kickoff, "Cuestionario de contexto en la terminal")
+    x.add_argument("kind", nargs="?", default="new", choices=["new", "existing"])
+
+    x = sp("memory", cmd_memory, "Memoria: search|add|list|delete|stats|export|import|rebuild|profile|kinds")
+    x.add_argument("action", choices=["search", "add", "list", "delete", "stats", "export", "import", "rebuild", "profile", "kinds"])
+    x.add_argument("args", nargs="*")
+    x.add_argument("--kind", "-k")
+    x.add_argument("--tags")
+    x.add_argument("-n", dest="k", type=int, default=10)
+
+    x = sp("task", cmd_task, "Tareas: add|list|set|done|show")
+    x.add_argument("action", choices=["add", "list", "ls", "set", "done", "show"])
+    x.add_argument("args", nargs="*")
+    x.add_argument("--assignee", "-a")
+    x.add_argument("--priority", "-p", default="media", choices=["alta", "media", "baja"])
+    x.add_argument("--feature", "-f")
+    x.add_argument("--status", "-s", choices=TASK_STATUSES)
+    x.add_argument("--all", action="store_true")
+
+    x = sp("agent", cmd_agent, "Equipo: list|show|add|extend|model|override|disable|enable|reset|remove")
+    x.add_argument("action", choices=["list", "show", "add", "extend", "model", "override", "disable", "enable", "reset", "remove"])
+    x.add_argument("name", nargs="?")
+    x.add_argument("text", nargs="?", help="Texto para extend / modelo para model")
+    x.add_argument("--description", "-d")
+    x.add_argument("--prompt")
+    x.add_argument("--model", "-m")
+    x.add_argument("--tools", "-t", help="'full', 'readonly' o lista separada por comas")
+    x.add_argument("--edit", "-e", action="store_true", help="Abrir el editor tras crear/override")
+
+    x = sp("command", cmd_command, "Comandos slash: list|add|disable|reset")
+    x.add_argument("action", choices=["list", "add", "disable", "reset"])
+    x.add_argument("name", nargs="?")
+    x.add_argument("--description", "-d")
+    x.add_argument("--body", "-b")
+
+    x = sp("team", cmd_team, "Definición del equipo: path|edit|export|validate")
+    x.add_argument("action", choices=["path", "edit", "export", "validate"])
+    x.add_argument("--base", action="store_true", help="Editar el team.yaml base (afecta a todos los proyectos)")
+
+    x = sub.add_parser("hook", help="(interno) hooks de Claude Code")
+    x.add_argument("event", choices=["session-start", "prompt"])
+    x.set_defaults(fn=cmd_hook)
+    x = sub.add_parser("mcp", help="(interno) servidor MCP stdio")
+    x.set_defaults(fn=cmd_mcp)
+    return p
+
+
+def main(argv=None):
+    parser = build_parser()
+    a, unknown = parser.parse_known_args(argv)
+    if a.cmd == "requisitos":
+        a.extra = list(a.extra) + unknown
+    elif unknown:
+        parser.error(f"argumentos no reconocidos: {' '.join(unknown)}")
+    if a.cmd == "install" and a.target:
+        a.path = a.target
+    if a.cmd in ("agent",) and a.action not in ("list",) and not a.name:
+        sys.exit("Falta el nombre del agente")
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()

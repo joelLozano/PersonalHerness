@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentes"
+version = "0.1.0"
+description = "Harness de equipo de desarrollo profesional (multi-agente) para Claude Code, con memoria vectorial"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["pyyaml>=6"]
+
+[project.optional-dependencies]
+vector = ["chromadb>=0.5"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+agentes = "agentes.cli:main"
+
+[tool.setuptools]
+packages = ["agentes"]
+
+[tool.setuptools.package-data]
+agentes = ["team.yaml", "requisitos.sh"]
