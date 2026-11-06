@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -435,7 +436,9 @@ def cmd_hook(a):
         if a.event == "session-start":
             s = Store(root, use_vectors=False)
             print("# Contexto del proyecto (memoria del equipo `agentes`)\n" + s.context_summary())
+            _refresh_index_background(root)
         elif a.event == "prompt":
+            _triage_hook(root, data)
             _recall(root, data)
     except Exception as e:  # pragma: no cover
         print(f"(agentes hook: {e})", file=sys.stderr)
@@ -458,11 +461,57 @@ STOP = {"para", "como", "cómo", "que", "qué", "con", "por", "una", "uno", "los
         "quiero", "necesito", "the", "and", "for", "with", "this", "that", "from", "what", "how", "can", "you"}
 
 
+FILLER = {"favor", "también", "tambien", "ahora", "luego", "después", "despues", "entonces", "bueno", "mejor",
+          "otra", "otro", "vez", "porfa", "please", "anterior", "mismo", "misma", "igual", "hazlo", "haz"}
+
+
+def _refresh_index_background(root: Path, max_age_s: int = 900) -> None:
+    """Re-indexa el código en segundo plano (incremental) si el índice tiene más de 15 min. No bloquea la sesión."""
+    stamp = root / HARNESS_DIR / "index.stamp"
+    try:
+        if stamp.exists() and time.time() - stamp.stat().st_mtime < max_age_s:
+            return
+        stamp.touch()
+        subprocess.Popen([sys.executable, "-m", "agentes", "index", "--quiet", "--path", str(root)],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, cwd=root)
+    except Exception:
+        pass
+
+
+def _prompt_text(data: dict) -> str:
+    return (data.get("prompt") or data.get("user_prompt") or os.environ.get("USER_PROMPT") or "").strip()
+
+
+def _triage_hook(root: Path, data: dict) -> None:
+    """Añade al mensaje el tipo/peso de la tarea, la ruta más barata y dónde está el código."""
+    from .triage import CMD_TYPE, render, triage
+    settings = load_team(root).get("settings", {})
+    prompt = _prompt_text(data)
+    if not settings.get("triage", True) or not prompt:
+        return
+    hint = None
+    if prompt.startswith("/"):
+        cmd, _, rest = prompt[1:].partition(" ")
+        if cmd not in CMD_TYPE or not rest.strip():
+            return
+        hint, prompt = CMD_TYPE[cmd], rest.strip()
+    import re as _re
+    words = _re.findall(r"\w+", prompt.lower())
+    content = [w for w in words if len(w) > 3 and w not in ACKS and w not in STOP and w not in FILLER]
+    if len(prompt) < 12 or not content:
+        return
+    res = triage(root, prompt, hint)
+    if res["tipo"] == "tarea" and not res.get("archivos") and not res.get("archivos_usuario") and len(prompt) < 80:
+        return  # seguimiento conversacional sin tarea reconocible: no añadir ruido
+    print(render(res))
+
+
 def _recall(root: Path, data: dict) -> None:
     """Auto-recall selectivo: solo memorias realmente relevantes y nunca repetidas en la misma sesión."""
     import re as _re
     settings = load_team(root).get("settings", {})
-    prompt = (data.get("prompt") or data.get("user_prompt") or os.environ.get("USER_PROMPT") or "").strip()
+    prompt = _prompt_text(data)
     if not settings.get("auto_recall", True) or prompt.startswith("/"):
         return
     words = _re.findall(r"\w+", prompt.lower())
@@ -502,6 +551,11 @@ def _recall(root: Path, data: dict) -> None:
             state_p.write_text(json.dumps(state))
         except OSError:
             pass
+
+
+def cmd_triage(a):
+    from .triage import render, triage
+    print(render(triage(root_of(a), " ".join(a.texto), a.tipo)))
 
 
 def cmd_bench(a):
@@ -556,6 +610,9 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--yes", "-y", action="store_true", help="No pedir confirmación")
     x.add_argument("--restore", nargs="?", const="", metavar="FECHA", help="Deshacer una migración (default: la última)")
     x.add_argument("--backups", action="store_true", help="Listar respaldos de migración")
+    x = sp("triage", cmd_triage, "Clasifica una tarea (tipo y peso XS-XL), ruta recomendada y dónde está el código")
+    x.add_argument("texto", nargs="+")
+    x.add_argument("--tipo", help="Forzar tipo (fix, feature, update, refactor...)")
     x = sp("bench", cmd_bench, "Compara BM25 vs búsqueda híbrida por modelo de embeddings (calidad, latencia, tokens)")
     x.add_argument("--modelos", default="bm25,ingles,multilingue",
                    help="Modos separados por coma: bm25, ingles, multilingue, multilingue-grande u otro modelo de fastembed")

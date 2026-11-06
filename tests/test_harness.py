@@ -262,3 +262,60 @@ def test_bench(proj, tmp_path):
                  "- {query: 'no existe', expect: 'zzz'}\n")
     mem, cs = bench.project_cases(proj, q)
     assert len(cs) == 1 and mem[cs[0]["expect"]].startswith("Los montos")
+
+
+def test_triage_pesos():
+    from agentes.triage import classify
+    casos = {
+        "corrige el typo en el botón de guardar": ("ajuste", "XS"),
+        "cambia el color del header a azul": ("ajuste", "XS"),
+        "el login no funciona cuando el correo tiene mayúsculas": ("fix", "S"),
+        "el cupón no se aplica bien al total": ("fix", "S"),
+        "agrega un campo de teléfono al formulario de registro": ("feature", "S"),
+        "agrega un filtro por fecha a la lista de pedidos en la API y en la pantalla": ("feature", "M"),
+        "actualiza react a la versión 19": ("update", "M"),
+        "¿dónde se calcula el total del carrito?": ("pregunta", "XS"),
+        "los pagos fallan a veces en producción con datos corruptos": ("fix", "L"),
+        "implementa un sistema de roles y permisos para el panel de administración con base de datos": ("feature", "XL"),
+    }
+    for texto, esperado in casos.items():
+        r = classify(texto)
+        assert (r["tipo"], r["peso"]) == esperado, (texto, r)
+    assert "workflow" in classify("cambia el texto del botón")["ruta"].lower()  # XS: explícitamente sin workflows
+    assert "CONFIRMACIÓN" in classify("refactoriza el módulo de pagos")["ruta"]
+
+
+def test_triage_codigo_y_hook(proj):
+    import os
+    from agentes.scanner import index_code, save_scan, scan
+    (proj / "src/lib").mkdir(parents=True)
+    (proj / "src/lib/pricing.ts").write_text("export function calculateTotal(items, coupon) {\n  // descuento cupón\n}\n")
+    (proj / "src/components").mkdir()
+    (proj / "src/components/CheckoutButton.tsx").write_text("export const CheckoutButton = () => <button>Pagar</button>;\n")
+    s = Store(proj, use_vectors=False)
+    save_scan(s, scan(proj))
+    index_code(s, proj)
+    ctx = s.context_summary()
+    assert "Dónde está el código" in ctx and "src/lib/" in ctx and "componentes UI" in ctx
+    from agentes.triage import render, triage
+    r = triage(proj, "el descuento del cupón calcula mal el total", store=s)
+    assert r["archivos"][0]["archivo"] == "src/lib/pricing.ts"
+    assert "usuario indicó" in render(triage(proj, "arregla src/lib/pricing.ts", store=s))
+    sync(proj)
+    out = subprocess.run([sys.executable, "-m", "agentes", "hook", "prompt"], cwd=proj, capture_output=True, text=True,
+                         input=json.dumps({"prompt": "/fix el descuento del cupón calcula mal el total", "cwd": str(proj)}),
+                         env={**os.environ, "AGENTES_NO_VECTORS": "1"}).stdout
+    assert "tipo=fix" in out and "src/lib/pricing.ts" in out
+    import agentes.mcp_server as m
+    m._store = s
+    assert "pricing.ts" in m._locate("calculateTotal coupon") and "peso=" in m._triage("cambia el color del botón")
+
+
+def test_kiro_sin_workflows_para_tareas_chicas(proj):
+    from agentes.installer import set_ides
+    set_ides(proj, ["kiro"])
+    sync(proj)
+    equipo = (proj / ".kiro/steering/agentes-equipo.md").read_text()
+    assert "NO delegues" in equipo and "confirmación explícita" in equipo
+    fix = (proj / ".kiro/steering/fix.md").read_text()
+    assert "sin delegar ni lanzar workflows" in fix and "XS / S" in fix

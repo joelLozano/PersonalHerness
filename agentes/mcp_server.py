@@ -68,6 +68,26 @@ def _search(query: str, kinds: str | None = None, k: int = 5, full: bool = False
     return "\n\n".join(out)
 
 
+@tool("code_locate", _s(
+    "Archivos y líneas más probables para una descripción (índice del código, sin modelo). Úsalo cuando no te indiquen archivos.",
+    query={"type": "string", "required": True},
+    k={"type": "integer", "description": "Archivos (default 6)"},
+))
+def _locate(query: str, k: int = 6):
+    from .triage import locate
+    files = locate(store(), query, min(int(k or 6), 15))
+    return "\n".join(f"{f['archivo']}:{','.join(f['lineas'])}" for f in files) or "Sin coincidencias (¿falta `agentes index`?)."
+
+
+@tool("triage", _s(
+    "Clasifica una tarea: tipo (fix, feature, update, refactor, ajuste...), peso XS-XL, ruta más barata y archivos probables.",
+    task={"type": "string", "required": True},
+))
+def _triage(task: str):
+    from .triage import render, triage
+    return render(triage(store().root, task, store=store()))
+
+
 @tool("memory_add", _s(
     "Guarda conocimiento durable (1-3 frases autocontenidas). Nada trivial ni temporal.",
     text={"type": "string", "required": True},

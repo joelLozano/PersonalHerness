@@ -12,7 +12,7 @@ Tú ─► Claude Code (orquestador)
 Hooks: SessionStart inyecta el contexto del proyecto · UserPromptSubmit recupera memorias relevantes (auto-recall)
 ```
 
-El mismo `team.yaml` genera los archivos de cada IDE. Claude Code usa `.claude/` y `CLAUDE.md`; Kiro usa `.kiro/` (ver la sección 3). La memoria, el perfil y las tareas son los mismos para ambos.
+El mismo `team.yaml` genera los archivos de cada IDE. Claude Code usa `.claude/` y `CLAUDE.md`; Kiro usa `.kiro/` (ver la sección 4). La memoria, el perfil y las tareas son los mismos para ambos.
 
 ## 1. Instalación (una vez por máquina)
 
@@ -70,7 +70,36 @@ Si prefieres responder en la terminal: `agentes kickoff`.
 | `/retro` | Consolida la memoria y propone mejoras al harness para ese proyecto |
 | `/bench` | Mide si la búsqueda vectorial mejora la memoria de tu proyecto, con preguntas sobre tus propias memorias |
 
-## 3. Kiro: Specs, sub-agentes y Workflows
+## 3. Triaje: cada tarea con el esfuerzo justo
+
+Cada mensaje que envías pasa por un **triaje automático**. Es determinista: no usa modelo, no gasta tokens y tarda unos 0.1 s. Agrega al mensaje un bloque como este:
+
+```
+Triaje agentes: tipo=fix · peso=S
+Ruta: Directo en esta sesión: localiza, haz el cambio y ejecuta las pruebas relacionadas. Sin workflows; no delegues.
+Código probable (lee solo estos rangos primero): src/lib/pricing.ts:1, src/app/api/orders/route.ts:1
+```
+
+| Peso | Ejemplos | Ruta |
+|---|---|---|
+| **XS** | typo, texto, color, una línea, preguntas | Directo en la sesión, sin sub-agentes ni workflows |
+| **S** | fix acotado, campo nuevo, actualización menor | Directo en la sesión con las pruebas relacionadas |
+| **M** | feature de varias piezas, versión mayor, refactor | Plan breve en el chat y una verificación con `qa-engineer` |
+| **L** | toca varias capas, producción, datos, módulo de pagos | Spec y receta de workflow **solo con tu confirmación**, indicando el costo |
+| **XL** | sistema o módulo nuevo de punta a punta | Dividir en entregas; ningún workflow sin confirmación |
+
+- **Tipos detectados:** `feature`, `fix`, `issue`, `update`, `refactor`, `ajuste`, `test`, `docs`, `seguridad` y `pregunta`.
+- **Dónde está el código:**
+  - El escaneo genera un **mapa del código** (rol de cada carpeta y puntos de entrada) que entra en el contexto de cada sesión.
+  - Si no indicas archivos, el triaje sugiere los más probables según el índice. Si mencionas un archivo, parte de ese.
+  - Los agentes tienen la herramienta `code_locate` para lo mismo.
+- **Índice al día:** el índice se actualiza en segundo plano al iniciar cada sesión (si tiene más de 15 min) y después de cada tarea de una Spec de Kiro.
+- **Tu criterio manda:** si dices que una tarea es más grande o más chica, el equipo te hace caso.
+- **Ajustes:**
+  - Para ver el resultado sin abrir el IDE: `agentes triage "texto"`.
+  - Para desactivarlo: `settings.triage: false` en `team.local.yaml`.
+
+## 4. Kiro: Specs, sub-agentes y Workflows
 
 ```bash
 agentes install --ide kiro      # o --ide ambos; sin --ide se detecta (.kiro/, .claude/, CLI instalados)
@@ -87,7 +116,12 @@ agentes ide add kiro            # agregar Kiro a un proyecto que ya tiene el har
 | Flujos con revisión | Recetas en `.kiro/workflows/`: `agentes-feature-lite` (5 sesiones como máximo), `agentes-feature` (14), `agentes-bugfix` (5), `agentes-security-audit` y `agentes-onboard` |
 | Archivos que Kiro no debe leer | Bloque gestionado en `.kiroignore`: dependencias, builds, archivos lock, `.env`. Solo lo aplica el IDE |
 
-**¿Workflows o solo agentes? Recomendación: combinarlos, sin desactivar los Workflows.**
+**Importante: con Workflows activado, delegar en un agente del equipo lanza un workflow.** Kiro ejecuta cada delegación a un custom agent como un workflow en segundo plano, que es caro. Por eso, en Kiro:
+- Las tareas **XS/S/M las hace el orquestador directamente**, sin delegar.
+- **Ningún workflow se lanza sin tu confirmación.**
+- En el chat de Kiro, revisa el control **Use workflows** (IDE 1.4.26 o posterior) y déjalo en **Only when asked**. Si nunca usas recetas, apaga Workflows: así la delegación vuelve a ser un sub-agente normal.
+
+**¿Workflows o solo agentes? Recomendación: combinarlos, pero solo para tareas L/XL.**
 - **Tareas pequeñas y preguntas:** chat y sub-agentes. Son rápidos y baratos.
 - **Planear una feature:** usa Kiro Specs (`requirements.md` / `design.md` / `tasks.md`). Tienen la interfaz de Kiro para ejecutar tareas, y el equipo las redacta con la memoria del proyecto. Las specs se indexan solas en la base de datos.
 - **Features medianas:** usa `agentes-feature-lite`: plan breve con tu aprobación → implementación full-stack → revisión + QA, con 2 ciclos como máximo.
@@ -102,7 +136,7 @@ agentes ide add kiro            # agregar Kiro a un proyecto que ya tiene el har
   Los comandos (`/feature`, `/fix`…) detectan esto y trabajan solo con sub-agentes.
 - **Modelos:** por defecto los agentes heredan el modelo de la sesión de Kiro. Para fijar uno, usa `kiro_model: claude-sonnet-4.6` en el agente dentro de `team.local.yaml`.
 
-## 4. Migrar configuraciones y archivos .md existentes
+## 5. Migrar configuraciones y archivos .md existentes
 
 `agentes install` detecta si el proyecto ya tiene configuraciones de agentes y te ofrece sustituirlas por el equipo (s/n). También puedes hacerlo cuando quieras:
 
@@ -164,7 +198,7 @@ Hábitos que también ayudan:
 - Desactiva los servidores MCP que no uses.
 - Ejecuta `/retro` para mantener la memoria corta.
 
-## 5. Memoria y contexto
+## 6. Memoria y contexto
 
 - **Una base de datos por proyecto** (`.agentes/agentes.db`), con estos tipos de memoria: `rule` (reglas siempre presentes), `decision`, `convention`, `design`, `requirement`, `bug`, `security`, `learning`, `profile`, `scan`, `code`, `spec` (specs de Kiro) y `note`.
 - **Búsqueda híbrida**: combina vectores (ChromaDB) con BM25 (SQLite FTS5) mediante Reciprocal Rank Fusion.
@@ -200,7 +234,7 @@ Si cambias el modelo, ejecuta `agentes memory rebuild`. Cada modelo tiene su pro
 - **Protocolo común**: todos los agentes leen el contexto antes de trabajar y guardan solo conocimiento durable al terminar.
 - **Compartir con tu equipo**: la base de datos no se sube a git. Usa `agentes memory export` para generar `.agentes/memory.json` y súbelo; quien lo reciba ejecuta `agentes memory import`.
 
-## 6. Comandos para modificar y mejorar el harness
+## 7. Comandos para modificar y mejorar el harness
 
 ### Instalación y mantenimiento
 ```bash
@@ -211,7 +245,7 @@ agentes requisitos                                # software del harness + del p
 agentes requisitos --check | --yes | --solo-requeridos | --lista
 agentes uninstall [--purge]                       # quitar del proyecto (--purge borra también la memoria)
 agentes ide list | add kiro | remove claude       # IDEs para los que se genera el equipo
-agentes migrate [--apply] [--keep] [--include G]  # migrar .md y configuraciones previas (ver sección 4)
+agentes migrate [--apply] [--keep] [--include G]  # migrar .md y configuraciones previas (ver sección 5)
 ./install.sh                                      # reinstalar el CLI (por ejemplo, tras añadir dependencias)
 ```
 
@@ -271,6 +305,7 @@ agentes memory list [-k decision] · delete <ids> · stats · kinds
 agentes memory profile [clave valor --tags seccion]   # ver o editar el perfil
 agentes memory export [archivo] · import [archivo] · rebuild   # rebuild: re-vectorizar (tras cambiar de modelo)
 agentes bench [--modelos bm25,ingles,multilingue] [--queries archivo.yaml]   # ¿conviene la búsqueda vectorial?
+agentes triage "texto de la tarea" [--tipo fix]  # tipo, peso XS-XL, ruta y código probable
 agentes task add "Paginar productos" -a backend-dev -p alta -f catalogo
 agentes task list [--all] [-s doing] · set <id> <estado> [nota] · done <ids> · show <id>
 ```
@@ -284,7 +319,7 @@ agentes task list [--all] [-s doing] · set <id> <estado> [nota] · done <ids> �
      auto_recall: false
    ```
 
-## 7. Estructura
+## 8. Estructura
 
 ```
 agentes/
@@ -295,6 +330,7 @@ agentes/
   migrate.py       # detección, migración a la BD, respaldo y restauración de configuraciones previas
   embeddings.py    # modelos de embeddings (multilingüe con fastembed, inglés de ChromaDB)
   bench.py         # benchmark BM25 vs búsqueda híbrida
+  triage.py        # triaje: tipo y peso de la tarea, ruta más barata y localización de código
   store.py         # memoria: SQLite + FTS5 + ChromaDB (híbrida), perfil, tareas
   scanner.py       # análisis de proyectos existentes + indexado incremental de código
   mcp_server.py    # servidor MCP sin dependencias (memory_*, profile_*, task_*, project_context)

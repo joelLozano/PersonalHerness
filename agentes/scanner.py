@@ -83,6 +83,49 @@ def _tree(root: Path, files: list[Path], depth: int = 2) -> list[str]:
     return [f"{k} ({v} archivos)" for k, v in sorted(counts.items())][:60]
 
 
+ROLES = [
+    ("API / rutas", r"(^|/)(api|routes?|controllers?|endpoints?|handlers?|resolvers?|graphql)(/|$)"),
+    ("páginas / vistas", r"(^|/)(pages|app|views?|screens?|routes)(/|$)"),
+    ("componentes UI", r"(^|/)(components?|ui|widgets?|layouts?)(/|$)"),
+    ("datos / modelos", r"(^|/)(models?|entities|schemas?|prisma|db|database|migrations?|repositor(y|ies)|dao)(/|$)"),
+    ("servicios / lógica", r"(^|/)(services?|domain|core|use-?cases?|business|lib)(/|$)"),
+    ("autenticación", r"(^|/)(auth|authentication|login|session|security)(/|$)"),
+    ("estado (frontend)", r"(^|/)(store|stores|state|redux|context|hooks?)(/|$)"),
+    ("utilidades", r"(^|/)(utils?|helpers?|common|shared)(/|$)"),
+    ("estilos", r"(^|/)(styles?|css|theme|tokens?)(/|$)"),
+    ("pruebas", r"(^|/)(tests?|__tests__|spec|specs|e2e|cypress|playwright)(/|$)"),
+    ("configuración / infra", r"(^|/)(config|configs?|infra|deploy|docker|k8s|terraform|\.github)(/|$)"),
+    ("scripts / jobs", r"(^|/)(scripts?|jobs?|workers?|cron|tasks?|queues?)(/|$)"),
+]
+ENTRY = r"(^|/)(main|index|app|server|manage|wsgi|asgi|program|cli)\.(py|ts|tsx|js|jsx|go|rs|java|kt|rb|php|cs)$"
+
+
+def code_map(root: Path, files: list[Path], max_lines: int = 18) -> list[str]:
+    """Qué hay en cada carpeta del código: rol probable, tamaño y archivos de ejemplo."""
+    groups: dict[str, list[str]] = {}
+    for f in files:
+        rel = f.relative_to(root).as_posix()
+        if f.suffix.lower() not in LANG_BY_EXT or rel.startswith((".kiro/", ".claude/", ".github/")):
+            continue
+        parts = rel.split("/")
+        depth = 3 if parts[0] in ("src", "app", "packages", "apps", "lib", "internal", "pkg") else 2
+        key = "/".join(parts[:min(len(parts) - 1, depth)]) or "."
+        groups.setdefault(key, []).append(rel)
+    lines = []
+    for key, rels in sorted(groups.items(), key=lambda kv: -len(kv[1]))[:max_lines]:
+        roles = [name for name, pat in ROLES if re.search(pat, key + "/", re.I)]
+        if not roles:  # inferir por nombres de archivo
+            joined = " ".join(rels).lower()
+            roles = [name for name, pat in ROLES if re.search(pat.replace("(^|/)", "(^|/|_|-)"), joined)][:1]
+        sample = ", ".join(sorted({Path(r).name for r in rels}, key=len)[:4])
+        lines.append(f"{key}/ — {' + '.join(roles[:2]) or 'código'} ({len(rels)} arch.; ej. {sample})")
+    entries = sorted({f.relative_to(root).as_posix() for f in files if re.search(ENTRY, f.relative_to(root).as_posix())},
+                     key=lambda r: (r.count("/"), r))[:6]
+    if entries:
+        lines.append("Puntos de entrada: " + ", ".join(entries))
+    return lines
+
+
 def scan(root: Path) -> dict:
     files = list_files(root)
     rel = {str(f.relative_to(root)) for f in files}
@@ -186,6 +229,7 @@ def scan(root: Path) -> dict:
                  reverse=True)[:8]
     report["largest_source_files"] = [f"{p} ({s // 1024} KB)" for s, p in big]
     report["structure"] = _tree(root, files)
+    report["code_map"] = code_map(root, files)
 
     if (root / ".git").exists():
         report["git"] = {
@@ -232,7 +276,9 @@ def report_to_text(r: dict) -> str:
             L.append("Commits recientes:\n  " + "\n  ".join(g["recent"][:10]))
         if g["hot_files"]:
             L.append("Archivos más modificados (6 meses):\n  " + "\n  ".join(g["hot_files"][:8]))
-    if r.get("structure"):
+    if r.get("code_map"):
+        L.append("Mapa del código:\n  " + "\n  ".join(r["code_map"]))
+    elif r.get("structure"):
         L.append("Estructura:\n  " + "\n  ".join(r["structure"][:40]))
     return "\n".join(L)
 
@@ -259,10 +305,13 @@ def save_scan(store: Store, r: dict) -> None:
     facts.append(f"El proyecto tiene {r.get('test_files', 0)} archivos de prueba.")
     if r.get("env_keys"):
         facts.append("Variables de entorno esperadas: " + ", ".join(r["env_keys"]))
-    if r.get("structure"):
+    if r.get("structure") and not r.get("code_map"):
         facts.append("Estructura de carpetas: " + "; ".join(r["structure"][:30]))
     for fact in facts:
         store.add(fact, kind="scan", source="agentes scan", _vector=True)
+    if r.get("code_map"):
+        store.add("Mapa del código:\n" + "\n".join(f"- {l}" for l in r["code_map"]), kind="scan",
+                  tags="mapa", source="agentes scan")
     (store.dir / "scan.json").write_text(json.dumps(r, ensure_ascii=False, indent=2))
 
 

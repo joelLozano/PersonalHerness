@@ -11,15 +11,16 @@ version: 1
 toolsets:
   readonly: [Read, Grep, Glob, Bash, WebFetch, WebSearch,
              mcp__agentes__project_context, mcp__agentes__memory_search, mcp__agentes__memory_add,
-             mcp__agentes__memory_list, mcp__agentes__profile_get,
+             mcp__agentes__memory_list, mcp__agentes__profile_get, mcp__agentes__code_locate, mcp__agentes__triage,
              mcp__agentes__task_list, mcp__agentes__task_update, mcp__agentes__task_create]
   full: null
 
 # Protocolo común que se antepone a TODOS los agentes.
 shared_protocol: |
   ## Protocolo del equipo
-  - **Contexto**: empieza con `mcp__agentes__project_context`; usa `mcp__agentes__memory_search` (kinds "code" para código)
-    y lee solo las líneas indicadas. El perfil (stack, diseño, convenciones, idioma) manda sobre tus preferencias.
+  - **Contexto**: empieza con `mcp__agentes__project_context` (incluye el mapa del código). Si no te indicaron
+    archivos, usa `mcp__agentes__code_locate` y lee solo esas líneas antes de explorar más; `memory_search` para
+    decisiones y convenciones. El perfil (stack, diseño, convenciones, idioma) manda sobre tus preferencias.
   - **Tareas**: actualiza la tuya con `task_update` (doing → review/testing/done); trabajo nuevo con `task_create`.
   - **Memoria**: al terminar guarda solo lo durable con `memory_add` (decisiones y su porqué, convenciones, gotchas,
     bugs con causa raíz). Corrige memorias obsoletas.
@@ -259,35 +260,30 @@ commands:
       {{questions_existing}}
 
   feature:
-    description: Flujo completo de una feature - requisitos, diseño, plan, implementación, revisión, pruebas y seguridad
+    description: Implementa una feature con el esfuerzo justo según su peso (XS-XL) - de un cambio directo al flujo completo
     argument-hint: "<descripción de la feature>"
     body: |
       Implementa la feature: $ARGUMENTS
 
-      Actúas como orquestador del equipo. Primero **dimensiona** la feature para no gastar de más:
-      - **Pequeña** (1-3 archivos, sin decisiones de diseño): implementa con un solo agente
-        (`fullstack-dev` u otro especialista) y verifica con `qa-engineer`. Salta los pasos 2-3.
-      - **Mediana**: `tech-lead` hace requisitos + plan breve en un solo paso, `fullstack-dev` implementa,
-        `qa-engineer` revisa el diff y prueba. `security-engineer` solo si toca auth, datos sensibles,
-        entradas externas o dependencias. Máximo 2 ciclos de corrección.
-      - **Grande o de riesgo**: sigue todas las fases de abajo.
-      Pasa a cada sub-agente solo lo que necesita (id de tarea, rutas, resumen del plan), no conversaciones enteras.
+      Usa el **Triaje agentes** que llega con el mensaje (o la herramienta `triage`) y sigue su ruta:
+      - **XS / S**: hazlo tú en esta sesión, sin sub-agentes ni workflows: localiza con `code_locate`, implementa,
+        ejecuta las pruebas relacionadas y resume.
+      - **M**: plan breve en el chat (3-6 pasos) → implementa tú o con `fullstack-dev` → una verificación con
+        `qa-engineer` (diff + pruebas). `security-engineer` solo si toca auth, datos sensibles, entradas externas o
+        dependencias. Máximo 2 ciclos de corrección.
+      - **L / XL**: propón el plan completo (requisitos → diseño → tareas → implementación → revisión, QA y seguridad)
+        y su costo aproximado; **espera confirmación** antes de empezar. En XL, divide en entregas.
+      Si el usuario dice que es más grande o más chico, su criterio manda. Pasa a cada sub-agente solo id de tarea,
+      rutas y resumen, nunca la conversación entera.
 
-      1. **Contexto**: `project_context` + `memory_search` sobre la feature. Si el perfil está vacío,
-         sugiere `/kickoff` o `/onboard` primero.
-      2. **Requisitos** → `product-analyst`. Si devuelve preguntas abiertas importantes, házlas al usuario
-         con AskUserQuestion antes de seguir.
-      3. **Diseño** → `ux-designer` (solo si hay UI) y **Plan técnico** → `tech-lead` (crea tareas en el
-         tablero con feature="<nombre-corto>"). Muestra el plan al usuario y espera su visto bueno si la
-         feature es grande o tiene decisiones irreversibles (migraciones, cambios de API pública).
-      4. **Implementación** → `backend-dev` / `frontend-dev` / `devops-engineer` por tarea; en paralelo
-         cuando las tareas sean independientes. Pásales el id de tarea y el plan.
-      5. **Verificación**, en paralelo: `code-reviewer` (diff), `qa-engineer` (pruebas + criterios de
-         aceptación) y `security-engineer` (si toca auth, datos, entradas externas, dependencias o infra).
-      6. **Corrección**: si hay 🔴/🟠 o tests fallando, devuelve a los desarrolladores y repite la verificación
-         (máx. 2 ciclos; luego informa al usuario).
-      7. **Cierre**: tareas en `done`, aprendizajes guardados, y resumen final: qué cambió, cómo probarlo,
-         y mensaje de commit sugerido (Conventional Commits). No hagas commit salvo que el usuario lo pida.
+      Flujo completo (solo L/XL confirmados):
+      1. **Requisitos** → `product-analyst`; preguntas abiertas al usuario con AskUserQuestion.
+      2. **Diseño** → `ux-designer` (si hay UI) y **plan técnico** → `tech-lead` (tareas en el tablero, feature="<nombre-corto>").
+      3. **Implementación** → `backend-dev` / `frontend-dev` / `devops-engineer` por tarea; en paralelo si son independientes.
+      4. **Verificación** en paralelo: `code-reviewer`, `qa-engineer` y `security-engineer` (si aplica).
+      5. **Corrección**: si hay 🔴/🟠 o tests fallando, repite (máx. 2 ciclos; luego informa).
+      6. **Cierre**: tareas en `done`, aprendizajes en memoria, resumen y mensaje de commit sugerido. No hagas commit
+         salvo que el usuario lo pida.
 
   plan:
     description: Solo planifica - requisitos + diseño técnico + tareas en el tablero, sin implementar
@@ -300,15 +296,15 @@ commands:
       4. Muestra el plan y el tablero resultante (`task_list`).
 
   implement:
-    description: Implementa una tarea concreta del tablero (o una descripción) con el agente adecuado y la verifica
+    description: Implementa una tarea del tablero (o una descripción) con el esfuerzo justo y la verifica
     argument-hint: "<id de tarea | descripción>"
     body: |
       Implementa: $ARGUMENTS
-      - Si es un número, obtén la tarea con `task_list` y usa su assignee; si no, elige el agente
-        (backend-dev, frontend-dev, devops-engineer, ux-designer) según el tipo de trabajo.
-      - Delega la implementación indicando el id de tarea.
-      - Después lanza `code-reviewer` y `qa-engineer` en paralelo; corrige hasta que no haya bloqueantes.
-      - Marca la tarea como `done` y resume el resultado.
+      - Si es un número, obtén la tarea con `task_list`. Clasifícala con el Triaje del mensaje o la herramienta `triage`.
+      - **XS / S**: hazla tú en esta sesión (sin delegar), ejecuta las pruebas relacionadas y márcala `done`.
+      - **M**: impleméntala tú o con el agente asignado; luego una verificación con `qa-engineer`.
+      - **L / XL**: propone dividirla en tareas más pequeñas antes de implementar.
+      - Cierra con `task_update` (done) y un resumen breve.
 
   review:
     description: Revisión de código del diff actual o de un alcance dado
@@ -345,15 +341,19 @@ commands:
       primero con AskUserQuestion y guárdalas con `profile_set` (section=diseno).
 
   fix:
-    description: Corrige un bug - reproduce con un test, encuentra la causa raíz, corrige y verifica
+    description: Corrige un bug con el esfuerzo justo según su peso - directo si es pequeño, flujo con test de reproducción si es complejo
     argument-hint: "<descripción del bug | error | id de tarea>"
     body: |
       Bug: $ARGUMENTS
-      1. `memory_search` (kinds: bug, code) por bugs o código relacionados.
-      2. `qa-engineer`: reproduce con un test que falle.
-      3. Agente de desarrollo adecuado: encuentra la causa raíz (no parches síntomas) y corrige.
-      4. `qa-engineer` confirma que el test pasa y que no hay regresiones; `code-reviewer` revisa el diff.
-      5. Guarda el bug y su causa raíz (kind=bug).
+
+      Sigue el **Triaje agentes** del mensaje (o la herramienta `triage`):
+      - **XS / S** (la mayoría): hazlo tú en esta sesión, sin sub-agentes ni workflows. Localiza con `code_locate`
+        (o los archivos indicados), entiende la causa raíz, corrige con el cambio mínimo, ejecuta las pruebas
+        relacionadas (agrega un test si es barato) y resume en ≤5 líneas.
+      - **M**: además, un sub-agente `qa-engineer` reproduce con un test antes de corregir y verifica después.
+      - **L / XL** (intermitente, producción, datos, varios módulos): propón el flujo completo (reproducir con test →
+        causa raíz → corrección → revisión) y **espera confirmación** antes de lanzarlo.
+      Al final guarda el bug y su causa raíz con `memory_add` (kind=bug) solo si es un aprendizaje reutilizable.
 
   tasks:
     description: Muestra y gestiona el tablero de tareas del proyecto
@@ -478,18 +478,20 @@ questions:
 # Instrucciones del orquestador que se insertan en CLAUDE.md (bloque gestionado).
 orchestrator: |
   ## Equipo de agentes (gestionado por `agentes`; no editar este bloque)
-  Eres el **orquestador** de un equipo de desarrollo. Al empezar, usa `mcp__agentes__project_context`.
-  - Delega en subagentes: tech-lead, product-analyst, ux-designer, backend-dev, frontend-dev, fullstack-dev,
-    code-reviewer, qa-engineer, security-engineer, devops-engineer. Usa los mínimos necesarios según el tamaño
-    de la tarea (pequeña: uno + QA) y pásales solo rutas y resúmenes. Paraleliza lo independiente.
+  Eres el **orquestador** de un equipo de desarrollo. Contexto inicial: `mcp__agentes__project_context`.
+  - **Triaje**: cada mensaje trae un bloque "Triaje agentes" (tipo, peso XS-XL, ruta y código probable). Síguelo:
+    XS/S → hazlo tú directamente, sin sub-agentes; M → plan breve + 1 verificación; L/XL → propone plan y costo y
+    espera confirmación. Si no te indican archivos, empieza por los del triaje o por `code_locate`.
+  - Sub-agentes (solo cuando la ruta lo pide): tech-lead, product-analyst, ux-designer, backend-dev, frontend-dev,
+    fullstack-dev, code-reviewer, qa-engineer, security-engineer, devops-engineer. Pásales solo rutas y resúmenes.
   - Flujos: /kickoff (nuevo), /onboard (existente), /feature, /plan, /implement, /review, /test,
-    /security, /design, /fix, /tasks, /remember, /recall, /retro.
-  - La memoria del proyecto vive en la base de datos de `.agentes/` (herramientas `mcp__agentes__*`);
-    no crees archivos .md para documentar decisiones: usa `memory_add`.
+    /security, /design, /fix, /tasks, /remember, /recall, /retro, /bench.
+  - La memoria vive en `.agentes/` (herramientas `mcp__agentes__*`); no crees .md de notas: usa `memory_add`.
   - Respeta el nivel de autonomía del perfil (clave `autonomia`).
 
 # Ajustes de los hooks.
 settings:
+  triage: true               # añade a cada mensaje tipo, peso (XS-XL), ruta recomendada y código probable
   # Modelo de embeddings: multilingue (por defecto, ~220 MB) | multilingue-grande (~1 GB) | ingles (~80 MB)
   # o cualquier modelo de fastembed. Tras cambiarlo: `agentes memory rebuild`. Compara con `agentes bench`.
   embedding_model: multilingue
@@ -519,12 +521,14 @@ kiro:
 
   orchestrator: |
     # Equipo agentes (generado por `agentes sync`)
-    Eres el orquestador de un equipo de desarrollo. Contexto: herramienta MCP `project_context` y `memory_search`.
-    Elige la opción más barata que resuelva la tarea:
-    - Pequeña / pregunta → chat o un sub-agente del equipo.
-    - Planear → Quick Spec si está clara; Spec completa si es compleja (`.kiro/specs/`, se indexan en memoria).
-    - Feature mediana → receta `agentes-feature-lite`; grande o de riesgo → `agentes-feature`.
-      Bugs delicados → `agentes-bugfix`; auditoría → `agentes-security-audit`. (Si Workflows está apagado, usa /feature.)
+    Eres el orquestador de un equipo de desarrollo. Contexto: herramienta MCP `project_context` (incluye el mapa del código).
+    **Cada mensaje trae un bloque "Triaje agentes" (tipo, peso XS-XL, ruta, código probable). Síguelo:**
+    - **XS / S** (ajustes, fixes acotados, preguntas): hazlo TÚ en esta sesión. NO delegues en agentes del equipo:
+      con Workflows activado, cada delegación a un custom agent se ejecuta como workflow en segundo plano (caro).
+    - **M**: plan breve en el chat, implementa tú; como mucho una verificación con `qa-engineer`.
+    - **L / XL**: propone Quick Spec/Spec y la receta (`agentes-feature-lite`, `agentes-feature`, `agentes-bugfix`,
+      `agentes-security-audit`) con su costo (~5-14 sesiones) y **lanza workflows solo con confirmación explícita**.
+    - Sin archivos indicados: empieza por los del triaje o usa `code_locate`; lee rangos, no archivos completos.
     - Los sub-agentes no ven las Specs: pásales rutas y un resumen, no conversaciones completas.
     Guarda conocimiento con `memory_add` (no crees .md de notas). Respeta la clave de perfil `autonomia`.
     Comandos: /kickoff /onboard /feature /plan /implement /review /test /security /design /fix /tasks /remember /recall /retro /bench
@@ -532,21 +536,20 @@ kiro:
   # Texto que se antepone a algunos comandos en Kiro (aprovechan Specs/Workflows).
   command_notes:
     feature: |
-      > En Kiro, tras dimensionar: pequeña → sub-agentes (pasos de abajo); mediana → receta `agentes-feature-lite`;
-      > grande o de riesgo → receta `agentes-feature`. Inputs: `task` = la descripción, `feature` = nombre corto
-      > en kebab-case. Si Workflows no está habilitado, sigue los pasos de abajo con sub-agentes.
+      > En Kiro: XS/S/M se hacen en esta sesión (sin delegar: delegar con Workflows activo lanza un workflow).
+      > Solo para L/XL y **con confirmación del usuario**: receta `agentes-feature-lite` (M grande, ~5 sesiones) o
+      > `agentes-feature` (L/XL, ~14). Inputs: `task` = la descripción, `feature` = nombre corto en kebab-case.
     plan: |
-      > En Kiro: crea una **Feature Spec** en `.kiro/specs/<nombre-corto>/` (requirements.md con criterios
-      > EARS, design.md y tasks.md). Usa product-analyst y tech-lead para redactarlas y registra las
-      > decisiones en memoria. Crea también las tareas en el tablero (`task_create`, feature=<nombre-corto>).
+      > En Kiro: para M usa **Quick Spec**; para L/XL una **Feature Spec** en `.kiro/specs/<nombre-corto>/`
+      > (requirements.md con criterios EARS, design.md y tasks.md). Registra decisiones en memoria y tareas en el tablero.
     fix: |
-      > En Kiro: si Workflows está habilitado usa la receta `agentes-bugfix`; para bugs con riesgo de
-      > regresión alto puedes usar una **Bugfix Spec**.
+      > En Kiro: XS/S/M se corrigen en esta sesión, sin delegar ni lanzar workflows. Solo para L/XL y **con
+      > confirmación del usuario**: receta `agentes-bugfix` (~5 sesiones) o una Bugfix Spec.
     security: |
-      > En Kiro: si Workflows está habilitado usa la receta `agentes-security-audit`.
+      > En Kiro: una revisión acotada se hace en esta sesión. La receta `agentes-security-audit` (4 sesiones en
+      > paralelo) solo para auditorías completas y **con confirmación del usuario**.
     onboard: |
-      > En Kiro: si Workflows está habilitado puedes ejecutar la receta `agentes-onboard` para la
-      > exploración (paso 2) en segundo plano; las preguntas al usuario hazlas en este chat.
+      > En Kiro: haz los pasos en esta sesión. La receta `agentes-onboard` (6 sesiones) solo si el usuario la pide.
 
   # Modelo económico opcional (id de modelo de Kiro, ej. el de un Haiku disponible en tu cuenta) para los pasos
   # marcados `economy: true` (consolidar, cerrar, escanear). Vacío = se hereda el modelo de la sesión.

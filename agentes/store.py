@@ -447,6 +447,7 @@ class Store:
                 budget -= len(t)
                 lines.append(f"- {t}")
             parts.append("## Reglas obligatorias\n" + "\n".join(lines))
+        cmap = self.db.execute("SELECT text FROM memories WHERE kind='scan' AND tags='mapa' ORDER BY id DESC LIMIT 1").fetchone()
         prof = self.profile_get()
         if prof:
             lines = []
@@ -455,9 +456,12 @@ class Store:
             parts.append("## Perfil del proyecto\n" + "\n".join(lines))
         else:
             parts.append("## Perfil del proyecto\n(vacío) -> ejecuta /kickoff (proyecto nuevo) o /onboard (existente)")
+        if cmap:
+            parts.append("## Dónde está el código\n" + cmap[0].split("\n", 1)[-1][:1000]
+                         + "\n(Si no te indican archivos: usa la herramienta code_locate antes de explorar.)")
         for kind, title, n in (("scan", "Stack y comandos detectados", 10), ("decision", "Decisiones recientes", 6), ("convention", "Convenciones", 8),
                                ("design", "Diseño", 5), ("learning", "Aprendizajes", 5)):
-            rows = self.list(kind, n)
+            rows = [r for r in self.list(kind, n + 1) if r.get("tags") != "mapa"][:n]
             if rows:
                 parts.append(f"## {title}\n" + "\n".join(f"- {r['text'][:220]}" for r in rows))
         tasks = self.task_list()
