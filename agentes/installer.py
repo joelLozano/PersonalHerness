@@ -19,7 +19,8 @@ LOCAL_TEAM = "team.local.yaml"
 GEN_MARK = "<!-- Generado por `agentes sync`. No edites aquí: usa .agentes/team.local.yaml o `agentes agent ...` -->"
 BLOCK_START, BLOCK_END = "<!-- agentes:start -->", "<!-- agentes:end -->"
 GITIGNORE_LINES = [".agentes/agentes.db", ".agentes/vectors/", ".agentes/scan.json", ".agentes/*.log",
-                   ".agentes/recall-state.json", ".agentes/backup/", ".agentes/vectors-error.json"]
+                   ".agentes/recall-state.json", ".agentes/backup/", ".agentes/vectors-error.json",
+                   ".agentes/design/compare/", ".agentes/design/shots/", ".agentes/design/figma/", ".agentes/index.stamp"]
 
 
 def cli_cmd() -> str:

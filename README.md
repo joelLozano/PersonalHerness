@@ -1,6 +1,6 @@
 # agentes: un equipo de desarrollo para Claude Code y Kiro
 
-`agentes` instala en cualquier proyecto (para Claude Code, Kiro o ambos) un equipo de 10 agentes con 15 flujos de trabajo (comandos slash), una memoria persistente con búsqueda vectorial y un tablero de tareas. Todo se define en un solo archivo (`agentes/team.yaml`). La memoria se guarda en una base de datos dentro del proyecto, no en archivos `.md`.
+`agentes` instala en cualquier proyecto (para Claude Code, Kiro o ambos) un equipo de 10 agentes con 16 flujos de trabajo (comandos slash), una memoria persistente con búsqueda vectorial y un tablero de tareas. Todo se define en un solo archivo (`agentes/team.yaml`). La memoria se guarda en una base de datos dentro del proyecto, no en archivos `.md`.
 
 ```
 Tú ─► Claude Code (orquestador)
@@ -12,7 +12,7 @@ Tú ─► Claude Code (orquestador)
 Hooks: SessionStart inyecta el contexto del proyecto · UserPromptSubmit recupera memorias relevantes (auto-recall)
 ```
 
-El mismo `team.yaml` genera los archivos de cada IDE. Claude Code usa `.claude/` y `CLAUDE.md`; Kiro usa `.kiro/` (ver la sección 4). La memoria, el perfil y las tareas son los mismos para ambos.
+El mismo `team.yaml` genera los archivos de cada IDE. Claude Code usa `.claude/` y `CLAUDE.md`; Kiro usa `.kiro/` (ver la sección 5). La memoria, el perfil y las tareas son los mismos para ambos.
 
 ## 1. Instalación (una vez por máquina)
 
@@ -65,6 +65,7 @@ Si prefieres responder en la terminal: `agentes kickoff`.
 | `/test [alcance]` | QA: diseña, escribe y ejecuta pruebas |
 | `/security [alcance]` | Auditoría OWASP, secretos, dependencias e infraestructura, con tareas de remediación |
 | `/design <pantalla\|sistema>` | Diseño UX/UI basado en tus preferencias |
+| `/design-ref <imagen\|nombre\|URL Figma>` | Replica una captura o un frame de Figma con la paleta exacta y verificación visual |
 | `/tasks` | Tablero de tareas |
 | `/remember <x>` · `/recall <q>` | Guardar o buscar en la memoria |
 | `/retro` | Consolida la memoria y propone mejoras al harness para ese proyecto |
@@ -99,7 +100,56 @@ Código probable (lee solo estos rangos primero): src/lib/pricing.ts:1, src/app/
   - Para ver el resultado sin abrir el IDE: `agentes triage "texto"`.
   - Para desactivarlo: `settings.triage: false` en `team.local.yaml`.
 
-## 4. Kiro: Specs, sub-agentes y Workflows
+## 4. Diseño desde capturas y Figma
+
+Una imagen pegada en el chat solo la ve esa conversación: los sub-agentes, los pasos de un workflow y las sesiones siguientes no la ven. Por eso las referencias se **registran**:
+
+```bash
+agentes design ref ~/Desktop/checkout.png --nombre checkout --nota "pago, escritorio"
+agentes design list
+```
+- La referencia se guarda en `.agentes/design/refs/`. Ahí cualquier agente la puede abrir por su ruta, y se versiona en git para compartirla con tu equipo.
+- Extrae la **paleta exacta** de los píxeles: colores dominantes en hex con su proporción. Así los colores ya no se adivinan a ojo.
+- Asigna roles a los colores (fondo, texto, acentos, superficies) y calcula el contraste WCAG.
+- Registra todo en la memoria (kind `design`).
+
+En el chat, `/design-ref checkout` (o una ruta, o una URL de Figma) hace el flujo completo:
+1. Registra la referencia.
+2. Analiza el layout con la paleta medida.
+3. Define los tokens de diseño.
+4. Implementa.
+5. **Verifica visualmente** comparando con la referencia.
+
+```bash
+agentes design shot http://localhost:3000/checkout --ancho 1440 --alto 900   # captura con Playwright
+agentes design compare checkout .agentes/design/shots/shot-....png           # % de diferencia y regiones
+```
+`compare` genera una imagen **referencia | implementación | diferencias en rojo**. También indica las regiones con más cambios y los colores de la referencia que faltan, y da un veredicto: muy parecido, diferencias menores o diferencias importantes. Los agentes de frontend corrigen con eso, en 2 rondas como máximo.
+
+Las capturas usan Playwright. Si no lo tienes, instálalo una vez con `npx playwright install chromium`.
+
+### Figma con el plan gratuito
+| Vía | Plan gratuito |
+|---|---|
+| **Exportar el frame como PNG** (clic derecho → Export) y `agentes design ref` | ✅ Sin límites. Es la vía recomendada |
+| `agentes design figma <url-con-node-id>` (API REST con token personal) | ⚠️ Usa 2 llamadas y guarda caché. En Starter, los límites de lectura y renderizado son muy bajos: sirve para importaciones ocasionales |
+| MCP oficial de Figma | ❌ Starter tiene un tope de 6 llamadas al mes |
+| MCP comunitario por plugin local (por ejemplo, `figma-mcp-go`) | ✅ Sin límites de API, pero es de terceros (ver abajo) |
+
+**Importar un frame con tu token.** Obtén el token en Figma → Settings → Security → Personal access tokens, con el scope `file_content:read`:
+```bash
+agentes design figma --save-token figd_xxx      # se guarda en ~/.config/agentes/figma.json (permiso 600), nunca en el proyecto
+agentes design figma "https://www.figma.com/design/<clave>/App?node-id=12-345"
+```
+Para obtener la URL, en Figma haz clic derecho en el frame → *Copy link to selection*. La importación extrae colores, tipografías (familia, peso, tamaño e interlineado), radios, espaciados de auto layout y sombras, y renderiza el frame como referencia.
+
+**MCP comunitario por plugin (opcional).** Este tipo de servidor lee el archivo abierto en Figma Desktop mediante un plugin de desarrollo, sin usar la API. Antes de usarlo:
+1. Revisa el código del servidor y del plugin. Otro servidor MCP comunitario de Figma tuvo una vulnerabilidad de ejecución remota de código (CVE-2025-53967).
+2. Fija una versión concreta; no uses `latest`.
+
+Si decides usarlo, agrégalo como servidor MCP en el IDE: en `.mcp.json` para Claude Code o en `.kiro/settings/mcp.json` para Kiro. El harness conserva los servidores que agregues. Después, importa el plugin desde su manifest en Figma Desktop: *Plugins → Development → Import plugin from manifest*.
+
+## 5. Kiro: Specs, sub-agentes y Workflows
 
 ```bash
 agentes install --ide kiro      # o --ide ambos; sin --ide se detecta (.kiro/, .claude/, CLI instalados)
@@ -136,7 +186,7 @@ agentes ide add kiro            # agregar Kiro a un proyecto que ya tiene el har
   Los comandos (`/feature`, `/fix`…) detectan esto y trabajan solo con sub-agentes.
 - **Modelos:** por defecto los agentes heredan el modelo de la sesión de Kiro. Para fijar uno, usa `kiro_model: claude-sonnet-4.6` en el agente dentro de `team.local.yaml`.
 
-## 5. Migrar configuraciones y archivos .md existentes
+## 6. Migrar configuraciones y archivos .md existentes
 
 `agentes install` detecta si el proyecto ya tiene configuraciones de agentes y te ofrece sustituirlas por el equipo (s/n). También puedes hacerlo cuando quieras:
 
@@ -198,7 +248,7 @@ Hábitos que también ayudan:
 - Desactiva los servidores MCP que no uses.
 - Ejecuta `/retro` para mantener la memoria corta.
 
-## 6. Memoria y contexto
+## 7. Memoria y contexto
 
 - **Una base de datos por proyecto** (`.agentes/agentes.db`), con estos tipos de memoria: `rule` (reglas siempre presentes), `decision`, `convention`, `design`, `requirement`, `bug`, `security`, `learning`, `profile`, `scan`, `code`, `spec` (specs de Kiro) y `note`.
 - **Búsqueda híbrida**: combina vectores (ChromaDB) con BM25 (SQLite FTS5) mediante Reciprocal Rank Fusion.
@@ -234,7 +284,7 @@ Si cambias el modelo, ejecuta `agentes memory rebuild`. Cada modelo tiene su pro
 - **Protocolo común**: todos los agentes leen el contexto antes de trabajar y guardan solo conocimiento durable al terminar.
 - **Compartir con tu equipo**: la base de datos no se sube a git. Usa `agentes memory export` para generar `.agentes/memory.json` y súbelo; quien lo reciba ejecuta `agentes memory import`.
 
-## 7. Comandos para modificar y mejorar el harness
+## 8. Comandos para modificar y mejorar el harness
 
 ### Instalación y mantenimiento
 ```bash
@@ -245,7 +295,7 @@ agentes requisitos                                # software del harness + del p
 agentes requisitos --check | --yes | --solo-requeridos | --lista
 agentes uninstall [--purge]                       # quitar del proyecto (--purge borra también la memoria)
 agentes ide list | add kiro | remove claude       # IDEs para los que se genera el equipo
-agentes migrate [--apply] [--keep] [--include G]  # migrar .md y configuraciones previas (ver sección 5)
+agentes migrate [--apply] [--keep] [--include G]  # migrar .md y configuraciones previas (ver sección 6)
 ./install.sh                                      # reinstalar el CLI (por ejemplo, tras añadir dependencias)
 ```
 
@@ -306,6 +356,7 @@ agentes memory profile [clave valor --tags seccion]   # ver o editar el perfil
 agentes memory export [archivo] · import [archivo] · rebuild   # rebuild: re-vectorizar (tras cambiar de modelo)
 agentes bench [--modelos bm25,ingles,multilingue] [--queries archivo.yaml]   # ¿conviene la búsqueda vectorial?
 agentes triage "texto de la tarea" [--tipo fix]  # tipo, peso XS-XL, ruta y código probable
+agentes design ref <img> | list | compare <ref> <captura> | shot <url> | figma <url>   # diseño desde referencias
 agentes task add "Paginar productos" -a backend-dev -p alta -f catalogo
 agentes task list [--all] [-s doing] · set <id> <estado> [nota] · done <ids> · show <id>
 ```
@@ -319,7 +370,7 @@ agentes task list [--all] [-s doing] · set <id> <estado> [nota] · done <ids> �
      auto_recall: false
    ```
 
-## 8. Estructura
+## 9. Estructura
 
 ```
 agentes/
@@ -330,6 +381,7 @@ agentes/
   migrate.py       # detección, migración a la BD, respaldo y restauración de configuraciones previas
   embeddings.py    # modelos de embeddings (multilingüe con fastembed, inglés de ChromaDB)
   bench.py         # benchmark BM25 vs búsqueda híbrida
+  design.py        # referencias visuales: paleta exacta, comparación visual, capturas, importación de Figma
   triage.py        # triaje: tipo y peso de la tarea, ruta más barata y localización de código
   store.py         # memoria: SQLite + FTS5 + ChromaDB (híbrida), perfil, tareas
   scanner.py       # análisis de proyectos existentes + indexado incremental de código

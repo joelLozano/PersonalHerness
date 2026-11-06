@@ -553,6 +553,60 @@ def _recall(root: Path, data: dict) -> None:
             pass
 
 
+def cmd_design(a):
+    from . import design
+    root = root_of(a)
+    if a.action == "ref":
+        if not a.args:
+            sys.exit("Uso: agentes design ref <imagen> [--nombre X] [--nota '...']")
+        info = design.add_reference(root, Path(a.args[0]), a.nombre, a.nota or "")
+        r = info["roles"]
+        ok(f"Referencia '{info['nombre']}' guardada en {info['archivo']} ({info['ancho']}×{info['alto']}, {info['formato']})")
+        print(f"  Fondo {r.get('fondo')} · texto {r.get('texto')} (contraste {r.get('contraste_texto')}:1)"
+              + (f" · acentos {', '.join(r['acentos'])}" if r.get("acentos") else ""))
+        print("  Paleta: " + ", ".join(f"{c['hex']} {c['pct']}%" for c in info["paleta"]))
+        if r.get("contraste_texto") and r["contraste_texto"] < 4.5:
+            warn("El contraste texto/fondo no cumple WCAG AA (4.5:1) para texto normal.")
+        print(f"  Siguiente: en Claude/Kiro ejecuta /design-ref {info['nombre']}")
+    elif a.action == "list":
+        refs = design.list_references(root)
+        for r in refs:
+            print(f"  {r['nombre']:24} {r['archivo']:48} {r['ancho']}×{r['alto']}  {r['roles'].get('fondo')} / "
+                  f"{r['roles'].get('texto')} / {', '.join(r['roles'].get('acentos', []))}")
+        if not refs:
+            print("Sin referencias. Agrega una con: agentes design ref <imagen>")
+    elif a.action == "compare":
+        if len(a.args) < 2:
+            sys.exit("Uso: agentes design compare <referencia|nombre> <captura-actual.png>")
+        res = design.compare(root, design.resolve_ref(root, a.args[0]), Path(a.args[1]),
+                             Path(a.out) if a.out else None)
+        print(f"Diferencia: {res['diferencia_pct']}% → {res['veredicto']}")
+        print("Regiones con más diferencias: " + ", ".join(f"{n} {p}%" for p, n in res["regiones"]))
+        if res["colores_faltantes"]:
+            print("Colores de la referencia que no aparecen en la implementación: " + ", ".join(res["colores_faltantes"]))
+        for w_ in res["avisos"]:
+            warn(w_)
+        print(f"Imagen (referencia | actual | diferencias en rojo): {res['imagen']}")
+    elif a.action == "shot":
+        if not a.args:
+            sys.exit("Uso: agentes design shot <url> [--out archivo.png] [--ancho 1440 --alto 900] [--completa]")
+        out = Path(a.out) if a.out else design.design_dir(root) / "shots" / f"shot-{time.strftime('%Y%m%d-%H%M%S')}.png"
+        ok(f"Captura: {design.screenshot(a.args[0], out, a.ancho, a.alto, a.completa)}")
+    elif a.action == "figma":
+        if a.save_token:
+            ok(f"Token guardado en {design.save_figma_token(a.save_token)} (solo lectura para tu usuario)")
+            if not a.args:
+                return
+        if not a.args:
+            sys.exit("Uso: agentes design figma <url-del-frame> [--nombre X]")
+        info = design.figma_import(root, a.args[0], a.nombre)
+        f = info["figma"]
+        ok(f"Frame de Figma importado como '{info['nombre']}' ({info['llamadas_api']} llamadas a la API; repetirlo usa caché)")
+        print(f"  Colores: {', '.join(f['colores'][:8])}\n  Tipografías: {'; '.join(f['tipografias'][:5])}")
+        print(f"  Radios: {f['radios']} · espaciados: {f['espaciados']}")
+        print(f"  Siguiente: /design-ref {info['nombre']}")
+
+
 def cmd_triage(a):
     from .triage import render, triage
     print(render(triage(root_of(a), " ".join(a.texto), a.tipo)))
@@ -610,6 +664,16 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--yes", "-y", action="store_true", help="No pedir confirmación")
     x.add_argument("--restore", nargs="?", const="", metavar="FECHA", help="Deshacer una migración (default: la última)")
     x.add_argument("--backups", action="store_true", help="Listar respaldos de migración")
+    x = sp("design", cmd_design, "Diseño desde referencias: ref <img> | list | compare <ref> <captura> | shot <url> | figma <url>")
+    x.add_argument("action", choices=["ref", "list", "compare", "shot", "figma"])
+    x.add_argument("args", nargs="*")
+    x.add_argument("--nombre", "-n")
+    x.add_argument("--nota")
+    x.add_argument("--out", "-o")
+    x.add_argument("--ancho", type=int, default=1440)
+    x.add_argument("--alto", type=int, default=900)
+    x.add_argument("--completa", action="store_true", help="Captura de página completa")
+    x.add_argument("--save-token", help="Guarda tu token personal de Figma en ~/.config/agentes (permiso 600)")
     x = sp("triage", cmd_triage, "Clasifica una tarea (tipo y peso XS-XL), ruta recomendada y dónde está el código")
     x.add_argument("texto", nargs="+")
     x.add_argument("--tipo", help="Forzar tipo (fix, feature, update, refactor...)")

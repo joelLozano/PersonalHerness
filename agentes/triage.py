@@ -33,6 +33,8 @@ TYPES: "OrderedDict[str, tuple[str, str]]" = OrderedDict([
     ("docs", (r"document|readme|comentari|jsdoc|docstring|changelog", "XS")),
     ("ajuste", (r"typo|ortograf|texto|label|etiqueta|copy|mensaje|placeholder|color|margen|margin|padding|alinea|"
                 r"tamaño de (letra|fuente)|icono|renombra|rename|tooltip|estilo", "XS")),
+    ("diseño", (r"dise[ñn]a|maqueta|mockup|\bcaptura|screenshot|figma|como (en )?la imagen|igual a la (imagen|referencia)|"
+                r"seg[uú]n (la|el) (imagen|dise[ñn]o|referencia)|\.(png|jpe?g|webp)\b", "M")),
     ("feature", (r"agreg|añad|crea|implement|nuev[oa]|permit|soporte para|integra|\badd\b|\bbuild\b|\bnew\b|"
                  r"habilita|desarroll|construi|hacer que", "M")),
 ])
@@ -49,7 +51,7 @@ DOWN = r"peque[nñ]|solo|sólo|simple|r[aá]pid|un (bot[oó]n|campo|texto|color)
 LAYERS = {"frontend": r"front|ui\b|pantalla|vista|componente|p[aá]gina|bot[oó]n|formulario|css|estilo",
           "backend": r"\bback|\bapi\b|endpoint|servidor|servicio|controlador|\brutas?\b",
           "datos": r"base de datos|\btablas?\b|migraci|esquema|\bmodelos?\b|\bquery\b|\bsql\b|prisma|\borm\b"}
-FILE_RX = r"(?:#\S+|[\w./-]+\.(?:py|ts|tsx|js|jsx|vue|svelte|go|rs|java|kt|rb|php|cs|css|scss|html|sql|yaml|yml|json|md))\b"
+FILE_RX = r"(?:#\S+|[\w./-]+\.(?:py|ts|tsx|js|jsx|vue|svelte|go|rs|java|kt|rb|php|cs|css|scss|html|sql|yaml|yml|json|md|png|jpe?g|webp))\b"
 STOP = {"para", "como", "cómo", "que", "qué", "con", "por", "una", "los", "las", "del", "este", "esta", "esto", "agrega",
         "agregar", "añade", "corrige", "arregla", "quiero", "necesito", "puedes", "favor", "hacer", "cuando", "donde",
         "dónde", "the", "and", "for", "with", "this", "that", "from", "error", "falla", "pantalla", "nuevo", "nueva"}
@@ -163,5 +165,8 @@ def render(res: dict) -> str:
     elif res.get("archivos"):
         lines.append("Código probable (lee solo estos rangos primero): " + ", ".join(
             f"{f['archivo']}:{','.join(f['lineas'])}" for f in res["archivos"]))
+    if res["tipo"] == "diseño":
+        lines.append("Diseño con referencia: regístrala (`agentes design ref <ruta>` o `agentes design figma <url>`), usa la "
+                     "paleta medida y verifica con `agentes design shot` + `agentes design compare` (/design-ref).")
     lines.append("Si el usuario indica otro alcance, su criterio manda.")
     return "\n".join(lines)

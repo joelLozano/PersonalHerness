@@ -87,6 +87,16 @@ agents:
         theme) y componentes base; no dupliques estilos.
       Entrega especificaciones que frontend-dev pueda implementar sin adivinar.
 
+      **Referencias visuales** (capturas, exportaciones de Figma) en `.agentes/design/refs/` (lista: `agentes design list`):
+      - Abre la imagen y su `.json`: la paleta y los roles (fondo, texto, acentos, superficies) están MEDIDOS de los píxeles.
+        Usa esos hex exactos; nunca estimes colores a ojo. Si hay tokens de Figma (tipografías, radios, espaciados,
+        sombras) también son exactos. Lo que no se pueda medir (tamaños de fuente en una captura) estímalo
+        con la escala tipográfica más cercana y dilo.
+      - Describe el layout de arriba a abajo: secciones, grilla/columnas, componentes y sus estados, espaciados
+        aproximados en múltiplos de 4/8 px, jerarquía tipográfica y comportamiento responsive.
+      - Convierte la paleta en tokens del proyecto (CSS vars / tailwind / theme) y guárdalo con `memory_add` (kind=design).
+      - Señala contrastes que no cumplan WCAG AA y propone la alternativa más cercana.
+
   backend-dev:
     description: >-
       Desarrollador backend senior. Úsalo para APIs, lógica de negocio, base de datos, migraciones,
@@ -116,6 +126,9 @@ agents:
       - Componentes pequeños y reutilizables, tipado estricto, estados de carga/vacío/error.
       - Accesibilidad (semántica HTML, teclado, ARIA) y responsive desde el inicio.
       - Pruebas de componentes/interacción según el framework del proyecto; ejecuta lint y build.
+      - **Si la pantalla tiene referencia visual** (`agentes design list`): al terminar, captura la implementación con el
+        mismo viewport (`agentes design shot <url> --ancho W --alto H`) y compárala (`agentes design compare <ref> <captura>`).
+        Corrige las regiones y colores señalados; máximo 2 rondas. Reporta el % de diferencia final.
 
   fullstack-dev:
     description: >-
@@ -130,6 +143,8 @@ agents:
       - Valida entradas, maneja errores, consultas parametrizadas, sin secretos en código.
       - UI con los tokens del sistema de diseño, accesible y responsive, con estados de carga/vacío/error.
       - Escribe o actualiza pruebas de lo que cambias y ejecuta tests, lint y build.
+      - Si la pantalla tiene referencia visual (`agentes design list`), verifica con `agentes design shot` +
+        `agentes design compare` (mismo viewport, máximo 2 rondas de ajuste).
 
   code-reviewer:
     description: >-
@@ -337,8 +352,27 @@ commands:
     argument-hint: "<pantalla, flujo o 'sistema'>"
     body: |
       Usa `ux-designer` para: $ARGUMENTS
+      Si existen referencias visuales (`agentes design list`), parte de ellas. Si el usuario adjuntó una imagen en el
+      chat, pídele que la guarde en el proyecto (o que indique su ruta) y ejecuta `agentes design ref <ruta>`: una
+      imagen pegada en el chat no la ven los sub-agentes ni las siguientes sesiones.
       Si faltan preferencias visuales en el perfil (colores, estilo, tipografía, modo oscuro), pregúntalas
       primero con AskUserQuestion y guárdalas con `profile_set` (section=diseno).
+
+  design-ref:
+    description: Diseña o replica una pantalla a partir de una captura o un frame de Figma (paleta exacta y verificación visual)
+    argument-hint: "<ruta de imagen | nombre de referencia | URL de Figma con node-id>"
+    body: |
+      Referencia: $ARGUMENTS
+      1. **Registrar**: si es una ruta de imagen → `agentes design ref <ruta> --nombre <nombre-corto>`; si es una URL de
+         Figma → `agentes design figma <url>` (2 llamadas a la API, con caché); si es un nombre → ya está registrada.
+         Si el usuario solo pegó la imagen en el chat, pídele que la guarde en el proyecto y te dé la ruta.
+      2. **Analizar** (tú, o `ux-designer` si la pantalla es compleja): abre la imagen y su `.json` en
+         `.agentes/design/refs/`. Con la paleta MEDIDA (no estimes colores) describe layout, componentes, tipografía y
+         espaciados, y define/actualiza los tokens de diseño del proyecto. Guarda el resumen con `memory_add` (kind=design).
+      3. **Implementar** siguiendo el Triaje (una pantalla suele ser M: hazlo en la sesión o con `frontend-dev`).
+      4. **Verificar**: `agentes design shot <url-local> --ancho <ancho-ref> --alto <alto-ref>` y
+         `agentes design compare <nombre> <captura>`. Corrige regiones y colores señalados (máx. 2 rondas) y muestra
+         al usuario la imagen de diferencias y el % final.
 
   fix:
     description: Corrige un bug con el esfuerzo justo según su peso - directo si es pequeño, flujo con test de reproducción si es complejo
@@ -485,7 +519,7 @@ orchestrator: |
   - Sub-agentes (solo cuando la ruta lo pide): tech-lead, product-analyst, ux-designer, backend-dev, frontend-dev,
     fullstack-dev, code-reviewer, qa-engineer, security-engineer, devops-engineer. Pásales solo rutas y resúmenes.
   - Flujos: /kickoff (nuevo), /onboard (existente), /feature, /plan, /implement, /review, /test,
-    /security, /design, /fix, /tasks, /remember, /recall, /retro, /bench.
+    /security, /design, /design-ref, /fix, /tasks, /remember, /recall, /retro, /bench.
   - La memoria vive en `.agentes/` (herramientas `mcp__agentes__*`); no crees .md de notas: usa `memory_add`.
   - Respeta el nivel de autonomía del perfil (clave `autonomia`).
 
@@ -531,7 +565,7 @@ kiro:
     - Sin archivos indicados: empieza por los del triaje o usa `code_locate`; lee rangos, no archivos completos.
     - Los sub-agentes no ven las Specs: pásales rutas y un resumen, no conversaciones completas.
     Guarda conocimiento con `memory_add` (no crees .md de notas). Respeta la clave de perfil `autonomia`.
-    Comandos: /kickoff /onboard /feature /plan /implement /review /test /security /design /fix /tasks /remember /recall /retro /bench
+    Comandos: /kickoff /onboard /feature /plan /implement /review /test /security /design /design-ref /fix /tasks /remember /recall /retro /bench
 
   # Texto que se antepone a algunos comandos en Kiro (aprovechan Specs/Workflows).
   command_notes:
@@ -559,7 +593,8 @@ kiro:
   # Archivos que Kiro IDE no debe leer (ahorra tokens y protege secretos). Se escribe en un bloque gestionado
   # de .kiroignore (sintaxis gitignore); tus propias líneas fuera del bloque se respetan.
   kiroignore: [node_modules/, dist/, build/, out/, .next/, .nuxt/, .turbo/, .cache/, coverage/, vendor/, target/,
-               "*.min.js", "*.map", "*.lock", package-lock.json, pnpm-lock.yaml, .agentes/, .env, .env.*,
+               "*.min.js", "*.map", "*.lock", package-lock.json, pnpm-lock.yaml, .agentes/agentes.db, .agentes/vectors/,
+               .agentes/backup/, .agentes/design/compare/, .env, .env.*,
                "!.env.example", "!.env.sample"]
 
   # Recetas de Workflows (formato oficial .workflow.json; aquí en YAML).

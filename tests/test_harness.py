@@ -319,3 +319,51 @@ def test_kiro_sin_workflows_para_tareas_chicas(proj):
     assert "NO delegues" in equipo and "confirmación explícita" in equipo
     fix = (proj / ".kiro/steering/fix.md").read_text()
     assert "sin delegar ni lanzar workflows" in fix and "XS / S" in fix
+
+
+def _mock_screen(path, btn=(34, 197, 94), dx=0):
+    from PIL import Image, ImageDraw
+    im = Image.new("RGB", (1200, 800), (255, 255, 255))
+    d = ImageDraw.Draw(im)
+    d.rectangle([0, 0, 1200, 70], fill=(15, 23, 42))
+    for i in range(5):
+        d.rectangle([100, 140 + i * 50, 760, 165 + i * 50], fill=(30, 41, 59))
+    d.rectangle([100 + dx, 480, 360 + dx, 540], fill=btn)
+    d.rectangle([840, 140, 1100, 440], fill=(241, 245, 249))
+    im.save(path)
+
+
+def test_design_referencia_y_comparacion(proj, tmp_path):
+    pytest.importorskip("PIL")
+    from agentes import design
+    ref, same, changed = tmp_path / "ref.png", tmp_path / "same.png", tmp_path / "changed.png"
+    _mock_screen(ref)
+    _mock_screen(same)
+    _mock_screen(changed, btn=(59, 130, 246), dx=200)
+    info = design.add_reference(proj, ref, "Checkout Pago", note="escritorio")
+    assert info["nombre"] == "checkout-pago" and (proj / info["archivo"]).exists()
+    hexes = [c["hex"] for c in info["paleta"]]
+    for h in ("#FFFFFF", "#0F172A", "#1E293B", "#F1F5F9", "#22C55E"):  # colores exactos, sin mezclas
+        assert h in hexes, hexes
+    r = info["roles"]
+    assert r["fondo"] == "#FFFFFF" and r["texto"] == "#0F172A" and r["acentos"] == ["#22C55E"]
+    assert r["contraste_texto"] > 15
+    assert "#22C55E" in Store(proj, use_vectors=False).search("referencia visual paleta checkout", "design")[0]["text"]
+    assert design.compare(proj, ref, same)["veredicto"] == "muy parecido"
+    res = design.compare(proj, ref, changed)
+    assert res["veredicto"] == "diferencias importantes" and "#22C55E" in res["colores_faltantes"]
+    assert (proj / res["imagen"]).exists() and "izquierda" in res["regiones"][0][1] or "centro" in res["regiones"][0][1]
+    assert design.resolve_ref(proj, "checkout-pago").suffix == ".png"
+    assert [x["nombre"] for x in design.list_references(proj)] == ["checkout-pago"]
+
+
+def test_figma_offline():
+    from agentes.design import figma_tokens, parse_figma_url
+    assert parse_figma_url("https://www.figma.com/design/AbC123/App?node-id=12-345") == ("AbC123", "12:345")
+    node = {"name": "Card", "fills": [{"type": "SOLID", "color": {"r": 1, "g": 1, "b": 1}}], "cornerRadius": 12,
+            "itemSpacing": 16, "children": [{"type": "TEXT", "style": {"fontFamily": "Inter", "fontWeight": 600,
+                                                                       "fontSize": 24, "lineHeightPx": 32},
+                                             "fills": [{"type": "SOLID", "color": {"r": 0, "g": 0, "b": 0}}]}]}
+    t = figma_tokens(node)
+    assert t["colores"] == ["#FFFFFF", "#000000"] and t["tipografias"] == ["Inter 600 24px/32px"]
+    assert t["radios"] == [12] and t["espaciados"] == [16]
