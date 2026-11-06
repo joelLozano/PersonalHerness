@@ -13,8 +13,9 @@ from pathlib import Path
 import yaml
 
 from . import __version__
-from .installer import (BASE_TEAM, IDES, deep_merge, get_ides, load_team, local_team_path, render_agent,
-                        render_questions, set_ides, sync, uninstall)
+from .installer import (BASE_TEAM, IDES, available_profiles, deep_merge, detect_profiles, get_ides, get_profiles,
+                        load_team, local_team_path, render_agent, render_questions, set_ides, set_profiles, sync,
+                        uninstall)
 from .store import HARNESS_DIR, KINDS, TASK_STATUSES, Store, dumps, find_root
 
 C = {"b": "\033[1m", "g": "\033[32m", "y": "\033[33m", "r": "\033[31m", "c": "\033[36m", "0": "\033[0m"}
@@ -39,6 +40,14 @@ def cmd_install(a):
     root = Path(a.path or ".").resolve()
     if not root.is_dir():
         sys.exit(f"No existe {root}")
+    if a.perfil:
+        set_profiles(root, [x.strip() for x in a.perfil.split(",") if x.strip() and x.strip() != "ninguno"])
+    elif not (root / HARNESS_DIR / "config.json").exists() or "profiles" not in json.loads(
+            (root / HARNESS_DIR / "config.json").read_text() or "{}"):
+        auto = detect_profiles(root)
+        set_profiles(root, auto)
+        if auto:
+            ok(f"Perfil detectado: {', '.join(auto)} (cámbialo con `agentes perfil set <perfil|ninguno>`)")
     ides = None
     if a.ide:
         ides = list(IDES) if a.ide in ("ambos", "all") else [a.ide]
@@ -49,7 +58,10 @@ def cmd_install(a):
     _offer_migration(root, a)
     store = Store(root)
     existing = any((root / m).exists() for m in ("package.json", "pyproject.toml", "go.mod", "Cargo.toml",
-                                                 "requirements.txt", "pom.xml", "Gemfile", "composer.json", "src"))
+                                                 "requirements.txt", "pom.xml", "Gemfile", "composer.json", "src",
+                                                 "Package.swift", "Podfile", "settings.gradle", "settings.gradle.kts",
+                                                 "build.gradle", "build.gradle.kts")) \
+        or any(root.glob("*.xcodeproj")) or any(root.glob("*.xcworkspace"))
     if existing and not a.no_scan:
         from .scanner import index_code, save_scan, scan
         print("Proyecto existente detectado → escaneando…")
@@ -60,6 +72,16 @@ def cmd_install(a):
             st = index_code(store, root)
             ok(f"Código indexado: {st['indexed']} archivos")
     vs = store.vector_status()
+    try:
+        from . import ds
+        if not ds.configured_paths(root):
+            for plat, ps in ds.detect(root).items():
+                ds.save_paths(root, plat, ps)
+        cat = ds.index(root, force=True) if ds.configured_paths(root) else {}
+        if cat:
+            ok(ds.summary_line(cat).split(". En tareas")[0] + " (ajusta con `agentes ds index --ios/--android`)")
+    except Exception as e:
+        warn(f"No se pudo indexar el design system: {e}")
     print(f"Memoria vectorial: {vs}")
     if vs.startswith("desactivado") and os.environ.get("AGENTES_NO_VECTORS") != "1":
         print("   Se usa búsqueda por palabras clave (BM25). Cuando tengas conexión: `agentes memory rebuild`;"
@@ -154,6 +176,26 @@ def cmd_ide(a):
     ok(f"IDEs: {', '.join(res['ides'])} (sincronizado)")
 
 
+def cmd_perfil(a):
+    root = root_of(a)
+    cur = get_profiles(root)
+    if a.action == "list":
+        print(f"Perfiles activos: {', '.join(cur) or 'ninguno (equipo base web/general)'}")
+        print(f"Disponibles: {', '.join(available_profiles())} · sugerido para este proyecto: "
+              f"{', '.join(detect_profiles(root)) or 'ninguno'}")
+        return
+    names = [n for n in (a.nombres or []) if n != "ninguno"]
+    bad = [n for n in names if n not in available_profiles()]
+    if bad:
+        sys.exit(f"Perfil desconocido: {bad}. Disponibles: {available_profiles()}")
+    new = names if a.action == "set" else (sorted(set(cur) | set(names)) if a.action == "add"
+                                            else [c for c in cur if c not in names])
+    set_profiles(root, new)
+    if (root / HARNESS_DIR).exists():
+        res = sync(root)
+        ok(f"Perfiles: {', '.join(new) or 'ninguno'} · {res['agents']} agentes, {res['commands']} comandos (sincronizado)")
+
+
 def cmd_sync(a):
     root = root_of(a)
     if not (root / HARNESS_DIR).exists():
@@ -230,6 +272,13 @@ def cmd_index(a):
         s.db.execute("DELETE FROM files")
         s.delete([r[0] for r in s.db.execute("SELECT id FROM memories WHERE kind='code'")])
     st = index_code(s, root, progress=None if a.quiet else (lambda n, t: print(f"  {n}/{t}…", end="\r")))
+    try:
+        from . import ds
+        if ds.configured_paths(root):
+            cat = ds.index(root)  # incremental: solo re-indexa si cambió el DS
+            st["design_system"] = sum(len(d["componentes"]) for d in cat.get("plataformas", {}).values())
+    except Exception as e:  # el DS nunca debe romper el indexado de código
+        st["design_system_error"] = str(e)[:120]
     if not a.quiet:
         ok(f"Indexado: {st}  ·  vectores: {s.vector_status()}")
 
@@ -440,6 +489,10 @@ def cmd_hook(a):
         elif a.event == "prompt":
             _triage_hook(root, data)
             _recall(root, data)
+        elif a.event == "stop":
+            code = _stop_hook(root, data, a.kiro)
+            if code:
+                sys.exit(code)
     except Exception as e:  # pragma: no cover
         print(f"(agentes hook: {e})", file=sys.stderr)
 
@@ -505,6 +558,72 @@ def _triage_hook(root: Path, data: dict) -> None:
     if res["tipo"] == "tarea" and not res.get("archivos") and not res.get("archivos_usuario") and len(prompt) < 80:
         return  # seguimiento conversacional sin tarea reconocible: no añadir ruido
     print(render(res))
+    _ds_context(root, data, prompt, res)
+
+
+UI_RX = (r"pantalla|vista|\bview|screen|bot[oó]n|button|componente|composable|swiftui|compose|layout|celda|\bcell|"
+         r"\bui\b|dise[ñn]|estilo|color|tipograf|modal|sheet|di[aá]logo|toolbar|navbar|tab ?bar|lista|formulario|"
+         r"tarjeta|card|icono|banner|header|footer|onboarding|splash|empty state|skeleton|\btext ?field|input")
+
+
+def _ds_context(root: Path, data: dict, prompt: str, res: dict) -> None:
+    """En tareas de UI añade el catálogo compacto del DS (completo una vez por sesión; luego solo lo relevante)."""
+    import re as _re
+    from . import ds
+    if not (res["tipo"] in ("diseño", "ajuste") or _re.search(UI_RX, prompt.lower())):
+        return
+    cat = ds.load_catalog(root)
+    if not cat:
+        return
+    plats = ds.platforms_in(prompt) or None
+    state_p = root / HARNESS_DIR / "recall-state.json"
+    try:
+        state = json.loads(state_p.read_text()) if state_p.exists() else {}
+    except Exception:
+        state = {}
+    sid = str(data.get("session_id") or "")
+    key = f"ds:{sid}:{','.join(plats or ['todas'])}"
+    rel = ds.relevant(cat, prompt, plats, 3)
+    if sid and state.get(key):
+        if rel:
+            print("Design system (relevante): " + "; ".join(f"[{ds.PLAT_NAMES[c['plataforma']]}] {c['firma']}" for c in rel))
+        return
+    print("Design system del proyecto (OBLIGATORIO en UI; detalle con ds_lookup; verifica con `agentes ds check`):\n"
+          + ds.compact(cat, plats))
+    if rel:
+        print("Más relevantes: " + "; ".join(f"[{ds.PLAT_NAMES[c['plataforma']]}] {c['firma']}" for c in rel))
+    if sid:
+        state[key] = 1
+        try:
+            state_p.write_text(json.dumps(state))
+        except OSError:
+            pass
+
+
+def _stop_hook(root: Path, data: dict, kiro: bool) -> int:
+    """Al terminar el turno: si los cambios usan nativos/literales en vez del DS, pide corregir (máx. 2 veces seguidas)."""
+    from . import ds
+    if not ds.load_catalog(root) or not load_team(root).get("settings", {}).get("ds_check_on_stop", True):
+        return 0
+    res = ds.check(root)
+    state_p = root / HARNESS_DIR / "recall-state.json"
+    try:
+        state = json.loads(state_p.read_text()) if state_p.exists() else {}
+    except Exception:
+        state = {}
+    key = f"stop:{data.get('session_id') or ''}"
+    if not res.get("errores"):
+        state.pop(key, None)
+        state_p.write_text(json.dumps(state))
+        return 0
+    blocks = state.get(key, 0)
+    if data.get("stop_hook_active") or blocks >= 2:
+        print(ds.render_check(res), file=sys.stderr)  # informa sin volver a bloquear (evita bucles)
+        return 0
+    state[key] = blocks + 1
+    state_p.write_text(json.dumps(state))
+    print(ds.render_check(res), file=sys.stderr)
+    return 1 if kiro else 2  # Claude Code: exit 2 = seguir trabajando con este mensaje
 
 
 def _recall(root: Path, data: dict) -> None:
@@ -553,6 +672,53 @@ def _recall(root: Path, data: dict) -> None:
             pass
 
 
+def cmd_ds(a):
+    from . import ds
+    root = root_of(a)
+    if a.action == "index":
+        paths = {}
+        if a.ios:
+            paths["ios"] = a.ios
+            ds.save_paths(root, "ios", a.ios)
+        if a.android:
+            paths["android"] = a.android
+            ds.save_paths(root, "android", a.android)
+        if not paths and not ds.configured_paths(root):
+            found = ds.detect(root)
+            if found:
+                for plat, ps in found.items():
+                    ds.save_paths(root, plat, ps)
+                ok("Design system detectado: " + "; ".join(f"{p}: {', '.join(v)}" for p, v in found.items())
+                   + " (guardado en .agentes/team.local.yaml; corrígelo con --ios/--android)")
+        cat = ds.index(root, force=True)
+        if not cat:
+            sys.exit("No encontré el design system. Indícalo: agentes ds index --ios <ruta> --android <ruta>")
+        for plat, d in cat["plataformas"].items():
+            ok(f"{ds.PLAT_NAMES[plat]}: {len(d['componentes'])} componentes, {len(d['modificadores'])} modificadores, "
+               f"{len(d['tokens']['colores'])} colores, {len(d['tokens']['espaciado'])} espaciados, "
+               f"{len(d['mapa'])} nativos mapeados ({', '.join(d['rutas'])})")
+        print(f"Catálogo compacto: ~{len(ds.compact(cat)) // 4} tokens (solo se añade en tareas de UI)")
+    elif a.action == "show":
+        cat = ds.load_catalog(root)
+        print(ds.compact(cat, [a.plataforma] if a.plataforma else None, 100_000) if cat else "Sin catálogo: agentes ds index")
+    elif a.action == "lookup":
+        print(ds.lookup(root, " ".join(a.args), a.plataforma))
+    elif a.action == "check":
+        res = ds.check(root, all_files=a.todo, files=a.args or None)
+        if a.json:
+            print(json.dumps(res, indent=2, ensure_ascii=False))
+        else:
+            print(ds.render_check(res))
+        sys.exit(1 if res.get("errores") else 0)
+    elif a.action == "map":
+        cat = ds.load_catalog(root)
+        for plat, d in (cat.get("plataformas") or {}).items():
+            print(f"[{ds.PLAT_NAMES[plat]}]")
+            for n, v in d["mapa"].items():
+                print(f"  {n:30} → {' | '.join(v)}")
+        print("Ajusta en team.local.yaml: settings.design_system.map / ignore, y ejecuta `agentes ds index`.")
+
+
 def cmd_design(a):
     from . import design
     root = root_of(a)
@@ -578,8 +744,11 @@ def cmd_design(a):
     elif a.action == "compare":
         if len(a.args) < 2:
             sys.exit("Uso: agentes design compare <referencia|nombre> <captura-actual.png>")
+        top, bottom = a.ignorar_arriba, a.ignorar_abajo
+        if a.movil and top is None:
+            top, bottom = 0.06, (bottom if bottom is not None else 0.04)  # barra de estado e indicador de inicio
         res = design.compare(root, design.resolve_ref(root, a.args[0]), Path(a.args[1]),
-                             Path(a.out) if a.out else None)
+                             Path(a.out) if a.out else None, ignore_top=top or 0.0, ignore_bottom=bottom or 0.0)
         print(f"Diferencia: {res['diferencia_pct']}% → {res['veredicto']}")
         print("Regiones con más diferencias: " + ", ".join(f"{n} {p}%" for p, n in res["regiones"]))
         if res["colores_faltantes"]:
@@ -587,6 +756,11 @@ def cmd_design(a):
         for w_ in res["avisos"]:
             warn(w_)
         print(f"Imagen (referencia | actual | diferencias en rojo): {res['imagen']}")
+    elif a.action == "shot" and (a.ios or a.android):
+        plat = "ios" if a.ios else "android"
+        out = Path(a.out) if a.out else design.design_dir(root) / "shots" / f"{plat}-{time.strftime('%Y%m%d-%H%M%S')}.png"
+        ok(f"Captura del {'simulador iOS' if a.ios else 'emulador Android'}: {design.device_screenshot(plat, out, a.dispositivo)}")
+        print(f"  Compara con: agentes design compare <referencia> {out} --movil")
     elif a.action == "shot":
         if not a.args:
             sys.exit("Uso: agentes design shot <url> [--out archivo.png] [--ancho 1440 --alto 900] [--completa]")
@@ -656,6 +830,7 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--no-index", action="store_true")
     x.add_argument("--ide", choices=[*IDES, "ambos", "all"], help="IDE(s) a generar (default: autodetección)")
     x.add_argument("--migrate", action="store_true", help="Migrar configuraciones previas sin preguntar")
+    x.add_argument("--perfil", help=f"Perfil(es) del equipo separados por coma: {', '.join(available_profiles())} o ninguno")
     x = sp("migrate", cmd_migrate, "Migra .md y configuraciones de agentes existentes a la BD y al equipo")
     x.add_argument("--apply", action="store_true", help="Aplicar (por defecto es un simulacro)")
     x.add_argument("--keep", action="store_true", help="Importar sin eliminar los originales")
@@ -664,6 +839,14 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--yes", "-y", action="store_true", help="No pedir confirmación")
     x.add_argument("--restore", nargs="?", const="", metavar="FECHA", help="Deshacer una migración (default: la última)")
     x.add_argument("--backups", action="store_true", help="Listar respaldos de migración")
+    x = sp("ds", cmd_ds, "Design system: index [--ios R --android R] | show | lookup <q> | check [--todo] | map")
+    x.add_argument("action", choices=["index", "show", "lookup", "check", "map"])
+    x.add_argument("args", nargs="*")
+    x.add_argument("--ios", action="append", help="Ruta(s) del DS de iOS (repetible)")
+    x.add_argument("--android", action="append", help="Ruta(s) del DS de Android (repetible)")
+    x.add_argument("--plataforma", "-P", choices=["ios", "android"])
+    x.add_argument("--todo", action="store_true", help="check: revisar todo el código, no solo los cambios")
+    x.add_argument("--json", action="store_true")
     x = sp("design", cmd_design, "Diseño desde referencias: ref <img> | list | compare <ref> <captura> | shot <url> | figma <url>")
     x.add_argument("action", choices=["ref", "list", "compare", "shot", "figma"])
     x.add_argument("args", nargs="*")
@@ -674,6 +857,12 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--alto", type=int, default=900)
     x.add_argument("--completa", action="store_true", help="Captura de página completa")
     x.add_argument("--save-token", help="Guarda tu token personal de Figma en ~/.config/agentes (permiso 600)")
+    x.add_argument("--ios", action="store_true", help="shot: captura del simulador iOS iniciado (xcrun simctl)")
+    x.add_argument("--android", action="store_true", help="shot: captura del emulador/dispositivo Android (adb)")
+    x.add_argument("--dispositivo", help="shot: UDID del simulador o serial de adb (por defecto el activo)")
+    x.add_argument("--movil", action="store_true", help="compare: ignora barra de estado (6%%) e indicador de inicio (4%%)")
+    x.add_argument("--ignorar-arriba", type=float, help="compare: fracción superior a ignorar (ej. 0.06)")
+    x.add_argument("--ignorar-abajo", type=float, help="compare: fracción inferior a ignorar")
     x = sp("triage", cmd_triage, "Clasifica una tarea (tipo y peso XS-XL), ruta recomendada y dónde está el código")
     x.add_argument("texto", nargs="+")
     x.add_argument("--tipo", help="Forzar tipo (fix, feature, update, refactor...)")
@@ -682,6 +871,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Modos separados por coma: bm25, ingles, multilingue, multilingue-grande u otro modelo de fastembed")
     x.add_argument("--queries", "-q", help="YAML con tus preguntas: [{query, expect: 'fragmento de la memoria'}]")
     x.add_argument("--json", action="store_true")
+    x = sp("perfil", cmd_perfil, "Perfiles del equipo: list | set <perfil...|ninguno> | add <perfil> | remove <perfil>")
+    x.add_argument("action", choices=["list", "set", "add", "remove"])
+    x.add_argument("nombres", nargs="*")
     x = sp("ide", cmd_ide, "IDEs del proyecto: list | add <claude|kiro> | remove <claude|kiro>")
     x.add_argument("action", choices=["list", "add", "remove"])
     x.add_argument("name", nargs="?")
@@ -742,7 +934,8 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--base", action="store_true", help="Editar el team.yaml base (afecta a todos los proyectos)")
 
     x = sub.add_parser("hook", help="(interno) hooks de Claude Code")
-    x.add_argument("event", choices=["session-start", "prompt"])
+    x.add_argument("event", choices=["session-start", "prompt", "stop"])
+    x.add_argument("--kiro", action="store_true")
     x.set_defaults(fn=cmd_hook)
     x = sub.add_parser("mcp", help="(interno) servidor MCP stdio")
     x.set_defaults(fn=cmd_mcp)

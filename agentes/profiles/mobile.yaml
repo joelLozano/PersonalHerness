@@ -1,0 +1,321 @@
+# =============================================================================
+#  Perfil MOBILE: apps nativas iOS (Swift, SwiftUI/UIKit) y Android (Kotlin, Compose/Views).
+#  Se aplica encima del team.yaml base: `agentes install --perfil mobile` o `agentes perfil set mobile`.
+#  Las listas reemplazan a las del base; los textos `*_extra` se agregan al final de los originales.
+# =============================================================================
+
+orchestrator_extra: |
+  ## Proyecto MOBILE nativo (iOS + Android)
+  - Agentes de plataforma: `ios-dev` (Swift, SwiftUI/UIKit) y `android-dev` (Kotlin, Compose/Views). No hay
+    frontend-dev ni fullstack-dev: donde los flujos los mencionen, usa el agente de la plataforma afectada
+    (ambos en paralelo solo si la tarea es para las dos y su peso lo justifica).
+  - **Design system obligatorio**: toda UI usa componentes y tokens del DS del proyecto (`ds_lookup`); nada de
+    componentes nativos con equivalente en el DS ni colores/tipografías/espaciados literales. Antes de terminar un
+    cambio de UI ejecuta `agentes ds check`.
+  - Verificación visual: `agentes design shot --ios|--android` + `agentes design compare <referencia> <captura>`.
+
+shared_protocol_extra: |
+  - **Mobile / DS**: en UI usa solo componentes y tokens del design system (`ds_lookup` para firmas y ejemplos). Si
+    falta un componente, propónlo para el DS en vez de crear uno ad-hoc. Corre `agentes ds check` antes de terminar.
+
+agents:
+  frontend-dev: {disabled: true}
+  fullstack-dev: {disabled: true}
+
+  ios-dev:
+    description: >-
+      Desarrollador iOS nativo senior (Swift, SwiftUI/UIKit). Úsalo para pantallas, navegación, estado,
+      networking, persistencia, accesibilidad y pruebas en iOS.
+    model: sonnet
+    color: blue
+    tools: full
+    prompt: |
+      Eres un desarrollador iOS senior. Respetas el stack y la arquitectura del proyecto (SwiftUI o UIKit, MVVM/TCA/
+      Clean, SPM/CocoaPods); no mezcles paradigmas sin una razón explícita.
+      - **Design system**: construye la UI SOLO con componentes y tokens del DS (`ds_lookup`): nada de `Button`,
+        `Text`, `Color(...)`, `.font(.system(size:))` o paddings mágicos si el DS tiene equivalente.
+      - Concurrencia moderna: async/await, `@MainActor` para UI, `Sendable`; cancela tareas en `onDisappear`/deinit.
+        Sin force unwrap ni `try!`; en UIKit usa `[weak self]` en closures retenidos.
+      - Estado: fuente única de verdad, vistas pequeñas, `@Observable`/`ObservableObject` según la versión mínima.
+      - Accesibilidad: Dynamic Type, etiquetas y traits de VoiceOver, contraste, áreas táctiles ≥ 44 pt.
+      - Textos en String Catalog/Localizable (nunca literales visibles), modo oscuro y safe areas.
+      - Previews para cada estado (cargando, vacío, error, datos) usando datos de ejemplo.
+      - Pruebas: XCTest o Swift Testing para lógica/ViewModels; XCUITest o snapshots si el proyecto los usa.
+        Compila y prueba con el esquema real (`xcodebuild -scheme <Esquema> -destination 'platform=iOS Simulator,name=<iPhone>' test`)
+        y respeta SwiftLint/SwiftFormat si están configurados.
+      - Antes de terminar UI: `agentes ds check`; si hay referencia visual, `agentes design shot --ios` + `agentes design compare`.
+
+  android-dev:
+    description: >-
+      Desarrollador Android nativo senior (Kotlin, Jetpack Compose/Views). Úsalo para pantallas, navegación, estado,
+      networking, persistencia, accesibilidad y pruebas en Android.
+    model: sonnet
+    color: green
+    tools: full
+    prompt: |
+      Eres un desarrollador Android senior. Respetas el stack y la arquitectura del proyecto (Compose o Views, MVVM/
+      MVI/Clean, Hilt/Koin, módulos Gradle); no mezcles paradigmas sin una razón explícita.
+      - **Design system**: construye la UI SOLO con componentes y tokens del DS (`ds_lookup`): nada de `Button`, `Text`,
+        `Color(0x...)`, `fontSize = 16.sp` o `dp` mágicos si el DS tiene equivalente.
+      - Corrutinas y Flow con scopes de lifecycle (`viewModelScope`, `collectAsStateWithLifecycle`); nada de trabajo en
+        el hilo principal; maneja cambios de configuración y muerte del proceso (`SavedStateHandle`).
+      - Compose: state hoisting, `remember`/`derivedStateOf`, keys estables en listas, evita recomposiciones innecesarias.
+      - Accesibilidad: `contentDescription`, semántica para TalkBack, áreas táctiles ≥ 48 dp, escala de fuente.
+      - Textos en `strings.xml` (nunca literales visibles), tema oscuro, insets/edge-to-edge.
+      - `@Preview` para cada estado (cargando, vacío, error, datos).
+      - Pruebas: JUnit + Turbine/coroutines-test para ViewModels; Compose UI tests/Espresso/Robolectric; snapshots
+        (Paparazzi/Roborazzi) si el proyecto los usa. Ejecuta `./gradlew :<modulo>:testDebugUnitTest lint` y
+        detekt/ktlint si están configurados.
+      - Antes de terminar UI: `agentes ds check`; si hay referencia visual, `agentes design shot --android` + `agentes design compare`.
+
+  ux-designer:
+    extra_prompt: |
+      Proyecto mobile nativo: sigue las Human Interface Guidelines (iOS) y Material 3 (Android) respetando las
+      convenciones de cada plataforma (navegación, gestos atrás, tab bar vs bottom navigation, hojas/diálogos),
+      safe areas, áreas táctiles 44 pt / 48 dp, Dynamic Type / escala de fuente y modo oscuro.
+      El **design system manda**: especifica las pantallas con sus componentes y tokens (`ds_lookup`); si falta algo,
+      propón la extensión del DS (nombre, API, variantes) en lugar de diseños ad-hoc.
+
+  qa-engineer:
+    extra_prompt: |
+      Mobile: XCTest/Swift Testing/XCUITest en iOS; JUnit, Turbine, Compose UI tests, Espresso y Robolectric en Android;
+      snapshots si el proyecto los usa. Casos propios de mobile: rotación, modo oscuro, Dynamic Type/escala de fuente
+      grande, sin red/modo avión y reconexión, app en segundo plano e interrupciones, permisos denegados, deep links,
+      muerte del proceso y restauración de estado, tablets/pantallas pequeñas.
+
+  security-engineer:
+    extra_prompt: |
+      Mobile: aplica OWASP MASVS/MASTG. Revisa almacenamiento seguro (Keychain / Android Keystore, nada sensible en
+      UserDefaults/SharedPreferences sin cifrar), ATS y network security config, certificate pinning si aplica, secretos
+      en el binario/Info.plist/BuildConfig, logs con PII, WebViews, deep links/intents/componentes exportados,
+      `allowBackup`, permisos mínimos, ofuscación R8/ProGuard y detección de jailbreak/root si el riesgo lo amerita.
+
+  devops-engineer:
+    extra_prompt: |
+      Mobile: Fastlane (match/gym/pilot para iOS; supply para Android), firma (certificados y perfiles; keystore fuera
+      del repo), CI con runners macOS (GitHub Actions/Xcode Cloud/Bitrise) y caché de Gradle/SPM, versionado
+      (CFBundleShortVersionString/CFBundleVersion, versionName/versionCode), TestFlight y tracks de Play Console,
+      subida de dSYMs/mappings a Crashlytics o similar.
+
+  code-reviewer:
+    extra_prompt: |
+      Mobile: verifica el uso del design system (`agentes ds check`), trabajo en el hilo principal, ciclos de retención
+      (iOS) y fugas de Context/Activity (Android), recomposiciones o redibujados innecesarios, accesibilidad y textos
+      localizados.
+
+  tech-lead:
+    extra_prompt: |
+      Mobile: diseña con modularización (paquetes SPM / módulos Gradle por feature y core), contratos de API con el
+      backend, estrategia offline/caché, navegación y deep links, y paridad funcional iOS/Android (mismas reglas de
+      negocio, UI nativa de cada plataforma). Divide las tareas por plataforma (assignee ios-dev / android-dev).
+
+questions:
+  new:
+    - section: producto
+      title: Producto y alcance
+      items:
+        - {id: nombre, q: "¿Cómo se llama la app?"}
+        - {id: objetivo, q: "¿Qué problema resuelve y para quién? (1-2 frases)"}
+        - {id: plataformas, q: "¿Plataformas?", opts: ["iOS y Android", "Solo iOS", "Solo Android"]}
+        - {id: usuarios, q: "¿Quiénes son los usuarios y qué roles existen?"}
+        - {id: features_mvp, q: "¿Cuáles son las 3-7 funcionalidades imprescindibles del MVP?"}
+        - {id: fuera_alcance, q: "¿Qué queda FUERA del alcance por ahora?"}
+        - {id: idioma, q: "¿Idiomas de la app y del código?", opts: ["App español / código inglés", "Multi-idioma", "Todo español"]}
+        - {id: plazo, q: "¿Fecha objetivo de publicación o restricciones?"}
+    - section: tecnico
+      title: Stack mobile
+      items:
+        - {id: ios_ui, q: "¿UI en iOS?", opts: [SwiftUI, UIKit, "Mixto (UIKit + SwiftUI)"]}
+        - {id: android_ui, q: "¿UI en Android?", opts: [Jetpack Compose, Views XML, Mixto]}
+        - {id: min_ios, q: "¿Versión mínima de iOS?", opts: ["iOS 16", "iOS 17", "iOS 18"]}
+        - {id: min_android, q: "¿minSdk de Android?", opts: ["API 26 (Android 8)", "API 28 (Android 9)", "API 31 (Android 12)"]}
+        - {id: arquitectura, q: "¿Arquitectura?", opts: [MVVM, "Clean + MVVM", "TCA (iOS) / MVI (Android)", "La que ya usa el equipo"]}
+        - {id: di, q: "¿Inyección de dependencias?", opts: ["Hilt / Factory", "Koin / Swinject", Manual]}
+        - {id: persistencia, q: "¿Persistencia local?", opts: ["SwiftData/Core Data + Room", "Solo caché", Ninguna]}
+        - {id: backend, q: "¿Backend?", opts: ["API REST propia", GraphQL, Firebase, Supabase]}
+        - {id: offline, q: "¿Comportamiento sin conexión?", opts: [Offline-first, "Caché básico", "Requiere conexión"]}
+        - {id: integraciones, q: "¿Integraciones? (push, deep links, analytics, pagos in-app, mapas, login social)"}
+    - section: diseno
+      title: Diseño y design system
+      items:
+        - {id: design_system, q: "¿Tienen design system? ¿Dónde vive en cada plataforma? (módulo del repo, paquete SPM/Gradle, solo Figma)"}
+        - {id: estilo, q: "¿Estilo visual?", opts: ["Nativo de cada plataforma (HIG / Material 3)", "Marca unificada en ambas", Mixto]}
+        - {id: colores, q: "¿Colores de marca? (hex) — si están en el DS, indícalo"}
+        - {id: modo_oscuro, q: "¿Modo oscuro?", opts: ["Sí, sigue al sistema", "Solo claro", "Selector en la app"]}
+        - {id: tipografia, q: "¿Tipografía?", opts: ["Del sistema (SF / Roboto)", "Fuente de marca", "La del DS"]}
+        - {id: dispositivos, q: "¿Dispositivos?", opts: ["Solo teléfonos", "Teléfonos y tablets", "Incluye iPad multitarea y plegables"]}
+        - {id: orientacion, q: "¿Orientación?", opts: ["Solo vertical", "Vertical y horizontal"]}
+        - {id: accesibilidad, q: "¿Nivel de accesibilidad?", opts: ["Completo (Dynamic Type/escala, VoiceOver/TalkBack)", Básico]}
+        - {id: referencias, q: "¿Apps de referencia o archivo de Figma? (exporta frames como PNG para `agentes design ref`)"}
+    - section: calidad
+      title: Calidad, publicación y flujo
+      items:
+        - {id: pruebas, q: "¿Estrategia de pruebas?", opts: ["Unitarias + UI tests", "Unitarias + snapshots", "Solo críticas"]}
+        - {id: ci, q: "¿CI/CD?", opts: [GitHub Actions, "Xcode Cloud + GitHub Actions", Bitrise, "Ninguno aún"]}
+        - {id: distribucion, q: "¿Distribución de pruebas?", opts: ["TestFlight + Play Console (internal)", "Firebase App Distribution", "Solo local"]}
+        - {id: datos_sensibles, q: "¿Maneja datos sensibles o regulados? (PII, pagos, salud)"}
+        - {id: git_flujo, q: "¿Flujo de git?", opts: ["Trunk-based + PRs", GitFlow]}
+        - {id: autonomia, q: "¿Cuánta autonomía quieres del equipo?", opts: ["Pedir aprobación del plan antes de implementar", "Implementar y mostrar al final", "Preguntar solo decisiones irreversibles"]}
+  existing:
+    - section: producto
+      title: Contexto del proyecto
+      items:
+        - {id: objetivo, q: "En una frase, ¿qué hace la app y para quién? (confirma o corrige lo que dedujimos)"}
+        - {id: siguiente_objetivo, q: "¿En qué quieres que trabajemos ahora?"}
+        - {id: dolores, q: "¿Mayores dolores actuales? (crashes, rendimiento, deuda, falta de tests)"}
+        - {id: no_tocar, q: "¿Partes que NO debemos tocar o que son delicadas?"}
+    - section: diseno
+      title: Design system
+      items:
+        - {id: design_system, q: "¿Dónde está el design system en cada plataforma? (confirma lo detectado por `agentes ds index`)"}
+    - section: calidad
+      title: Flujo
+      items:
+        - {id: distribucion, q: "¿Cómo se distribuyen las builds de prueba y producción?"}
+        - {id: autonomia, q: "¿Cuánta autonomía quieres del equipo?", opts: ["Pedir aprobación del plan antes de implementar", "Implementar y mostrar al final", "Preguntar solo decisiones irreversibles"]}
+
+kiro:
+  orchestrator_extra: |
+    **Proyecto MOBILE**: agentes `ios-dev` y `android-dev` (no hay frontend-dev ni fullstack-dev). Toda UI usa
+    componentes y tokens del design system (`ds_lookup`); antes de terminar UI ejecuta `agentes ds check`.
+  kiroignore: [DerivedData/, build/, .build/, Pods/, Carthage/, "*.xcuserstate", xcuserdata/, .gradle/, "*.apk", "*.aab",
+               "*.ipa", "*.dSYM/", local.properties, "*.keystore", "*.jks", "*.p12", "*.mobileprovision", node_modules/,
+               "*.lock", .agentes/agentes.db, .agentes/vectors/, .agentes/backup/, .agentes/design/compare/, .env, .env.*,
+               "!.env.example"]
+  workflows:
+    agentes-feature-lite:
+      description: "Equipo agentes mobile (económico): plan breve con aprobación → implementación por plataforma → revisión+QA, máx. 2 ciclos"
+      inputs: {task: prompt, feature: string}
+      steps:
+        - type: step
+          id: plan
+          agent: tech-lead
+          effortLevel: high
+          prompt: |
+            Feature: {{task}}
+            Escribe .kiro/specs/{{feature}}/requirements.md (criterios EARS breves) y .kiro/specs/{{feature}}/tasks.md (checklist corta,
+            cada tarea con [ios] o [android]), usando los componentes del design system (ds_lookup). Pide aprobación con un mensaje de
+            advertencia (≤100 palabras); cuando apruebe, termina con PLAN APROBADO.
+          completion: {containsText: "PLAN APROBADO"}
+        - type: repeat
+          id: ciclo
+          maxIterations: 2
+          onMaxIterations: pause
+          stopCondition: {containsText: "VEREDICTO: APROBADO"}
+          steps:
+            - type: parallel
+              id: implementacion
+              joinPolicy: allSettled
+              branches:
+                - type: step
+                  id: ios
+                  agent: ios-dev
+                  effortLevel: medium
+                  prompt: |
+                    Lee solo .kiro/specs/{{feature}}/tasks.md. Si no hay tareas [ios] pendientes, responde "SIN TAREAS" y termina sin explorar.
+                    Si las hay, impleméntalas con el design system (y los hallazgos de .kiro/workflow-output/{{feature}}-revision.md si
+                    existe), ejecuta las pruebas y `agentes ds check`, y marca las casillas. Respuesta final ≤150 palabras.
+                - type: step
+                  id: android
+                  agent: android-dev
+                  effortLevel: medium
+                  prompt: |
+                    Lee solo .kiro/specs/{{feature}}/tasks.md. Si no hay tareas [android] pendientes, responde "SIN TAREAS" y termina sin
+                    explorar. Si las hay, impleméntalas con el design system (y los hallazgos previos si existen), ejecuta las pruebas y
+                    `agentes ds check`, y marca las casillas. Respuesta final ≤150 palabras.
+            - type: step
+              id: verificar
+              agent: qa-engineer
+              effortLevel: medium
+              prompt: |
+                Revisa el diff de {{feature}} (corrección, uso del design system con `agentes ds check`, accesibilidad, seguridad básica) y
+                verifica los criterios de .kiro/specs/{{feature}}/requirements.md con pruebas. Escribe los hallazgos en
+                .kiro/workflow-output/{{feature}}-revision.md. Si no hay bloqueantes: marca tareas (task_update), guarda aprendizajes y
+                termina con "VEREDICTO: APROBADO" y un mensaje de commit sugerido; si los hay, "VEREDICTO: CAMBIOS". ≤150 palabras.
+
+    agentes-feature:
+      description: "Equipo agentes mobile (completo): requisitos → diseño con aprobación → iOS/Android/backend en paralelo → revisión, QA y seguridad en ciclo"
+      inputs: {task: prompt, feature: string}
+      steps:
+        - type: step
+          id: requisitos
+          agent: product-analyst
+          effortLevel: medium
+          prompt: |
+            Feature: {{task}}
+            Escribe .kiro/specs/{{feature}}/requirements.md (historias, criterios EARS, alcance, diferencias por plataforma si las hay),
+            consultando antes la memoria. Ambigüedades importantes: mensaje de advertencia con las preguntas. Respuesta ≤100 palabras.
+        - type: step
+          id: diseno
+          agent: tech-lead
+          effortLevel: high
+          prompt: |
+            Con .kiro/specs/{{feature}}/requirements.md escribe .kiro/specs/{{feature}}/design.md (arquitectura por plataforma, contratos de
+            API, estado, navegación, componentes del design system a usar vía ds_lookup, offline, pruebas) y
+            .kiro/specs/{{feature}}/tasks.md (tareas pequeñas marcadas [ios], [android] o [backend]). Registra decisiones y tareas.
+            Pide aprobación con un mensaje de advertencia (≤120 palabras); cuando apruebe termina con PLAN APROBADO.
+          completion: {containsText: "PLAN APROBADO"}
+        - type: repeat
+          id: ciclo-entrega
+          maxIterations: 2
+          onMaxIterations: pause
+          stopCondition: {containsText: "VEREDICTO: APROBADO"}
+          steps:
+            - type: parallel
+              id: implementacion
+              joinPolicy: allSettled
+              branches:
+                - {type: step, id: ios, agent: ios-dev, effortLevel: medium, prompt: "Lee solo .kiro/specs/{{feature}}/tasks.md. Sin tareas [ios] pendientes: responde \"SIN TAREAS\" y termina sin explorar. Si las hay, impleméntalas con el design system, ejecuta pruebas y `agentes ds check`, marca casillas. ≤150 palabras."}
+                - {type: step, id: android, agent: android-dev, effortLevel: medium, prompt: "Lee solo .kiro/specs/{{feature}}/tasks.md. Sin tareas [android] pendientes: responde \"SIN TAREAS\" y termina sin explorar. Si las hay, impleméntalas con el design system, ejecuta pruebas y `agentes ds check`, marca casillas. ≤150 palabras."}
+                - {type: step, id: backend, agent: backend-dev, effortLevel: medium, prompt: "Lee solo .kiro/specs/{{feature}}/tasks.md. Sin tareas [backend] pendientes: responde \"SIN TAREAS\" y termina sin explorar. Si las hay, impleméntalas y ejecuta pruebas. ≤150 palabras."}
+            - type: parallel
+              id: verificacion
+              joinPolicy: allSettled
+              branches:
+                - {type: step, id: revision, agent: code-reviewer, effortLevel: high, prompt: "Revisa el diff de {{feature}} contra .kiro/specs/{{feature}}/design.md, incluido `agentes ds check`. No edites archivos. Solo hallazgos 🔴/🟠/🟡 con archivo:línea (≤200 palabras)."}
+                - {type: step, id: qa, agent: qa-engineer, effortLevel: medium, prompt: "Verifica los criterios de .kiro/specs/{{feature}}/requirements.md en las plataformas afectadas (incluye casos mobile: rotación, modo oscuro, fuente grande, sin red). Reporta resultados y fallos (≤150 palabras)."}
+                - {type: step, id: seguridad, agent: security-engineer, effortLevel: high, prompt: "Audita los cambios de {{feature}} con MASVS (almacenamiento, red, secretos, componentes exportados). No edites archivos. Solo hallazgos (≤150 palabras)."}
+            - type: step
+              id: consolidar
+              agent: qa-engineer
+              effortLevel: low
+              economy: true
+              prompt: |
+                Consolida en .kiro/workflow-output/{{feature}}-revision.md:
+
+                {{revision.output}}
+
+                {{qa.output}}
+
+                {{seguridad.output}}
+
+                Si no hay 🔴, 🟠 ni pruebas fallando: marca tareas, guarda aprendizajes y termina con "VEREDICTO: APROBADO" y un mensaje
+                de commit sugerido; si los hay, "VEREDICTO: CAMBIOS".
+
+    agentes-bugfix:
+      description: "Equipo agentes mobile: reproducir con test → corrección en la plataforma afectada → verificación (máx. 2 ciclos)"
+      inputs: {bug: prompt}
+      steps:
+        - type: step
+          id: reproducir
+          agent: qa-engineer
+          effortLevel: medium
+          prompt: "Bug: {{bug}}. Identifica la plataforma afectada ([ios], [android] o ambas), busca contexto (memory_search kinds bug,code / code_locate) y escribe un test que lo reproduzca. Empieza tu respuesta con la etiqueta de plataforma. ≤120 palabras."
+        - type: repeat
+          id: ciclo-fix
+          maxIterations: 2
+          onMaxIterations: pause
+          stopCondition: {containsText: "TESTS OK"}
+          steps:
+            - type: parallel
+              id: corregir
+              joinPolicy: allSettled
+              branches:
+                - {type: step, id: fix-ios, agent: ios-dev, effortLevel: high, prompt: "Si este diagnóstico no incluye [ios], responde \"SIN TAREAS\" y termina: {{reproducir.output}}\nSi lo incluye, encuentra la causa raíz y corrige: {{bug}}. ≤120 palabras."}
+                - {type: step, id: fix-android, agent: android-dev, effortLevel: high, prompt: "Si este diagnóstico no incluye [android], responde \"SIN TAREAS\" y termina: {{reproducir.output}}\nSi lo incluye, encuentra la causa raíz y corrige: {{bug}}. ≤120 palabras."}
+            - type: step
+              id: verificar
+              agent: qa-engineer
+              effortLevel: low
+              economy: true
+              prompt: "Ejecuta el test de reproducción y la suite relevante y revisa el diff. Si todo pasa: guarda el bug con su causa raíz (memory_add kind=bug) y termina con 'TESTS OK'. Si no, describe brevemente qué falla."

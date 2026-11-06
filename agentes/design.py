@@ -174,11 +174,24 @@ REGIONS = [["arriba-izquierda", "arriba-centro", "arriba-derecha"],
            ["abajo-izquierda", "abajo-centro", "abajo-derecha"]]
 
 
-def compare(root: Path, ref_path: Path, actual_path: Path, out: Path | None = None, threshold: int = 40) -> dict:
+def _crop(im, top: float, bottom: float):
+    w, h = im.size
+    return im.crop((0, round(h * top), w, h - round(h * bottom))) if (top or bottom) else im
+
+
+def out_dir_tmp(root: Path, tag: str, im) -> Path:
+    p = design_dir(root) / "compare" / f".tmp-{tag}.png"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    im.save(p)
+    return p
+
+
+def compare(root: Path, ref_path: Path, actual_path: Path, out: Path | None = None, threshold: int = 40,
+            ignore_top: float = 0.0, ignore_bottom: float = 0.0) -> dict:
     Image = _pil()
     from PIL import ImageChops  # type: ignore
-    ref = Image.open(ref_path).convert("RGB")
-    act = Image.open(actual_path).convert("RGB")
+    ref = _crop(Image.open(ref_path).convert("RGB"), ignore_top, ignore_bottom)
+    act = _crop(Image.open(actual_path).convert("RGB"), ignore_top, ignore_bottom)
     warn = []
     ra, aa = ref.size[0] / ref.size[1], act.size[0] / act.size[1]
     if abs(ra - aa) / ra > 0.05:
@@ -199,7 +212,8 @@ def compare(root: Path, ref_path: Path, actual_path: Path, out: Path | None = No
             area = (box[2] - box[0]) * (box[3] - box[1])
             regions.append((round(100 * h[255] / area, 1), REGIONS[r][c]))
     regions.sort(reverse=True)
-    pal_ref, pal_act = palette(ref_path), palette(actual_path, 12)
+    tmp_r, tmp_a = out_dir_tmp(root, "r", ref), out_dir_tmp(root, "a", act)
+    pal_ref, pal_act = palette(tmp_r), palette(tmp_a, 12)
     missing = [c["hex"] for c in pal_ref if c["pct"] >= 1
                and min((dist(c["rgb"], a["rgb"]) for a in pal_act), default=999) > 45]
     out = out or design_dir(root) / "compare" / f"diff-{Path(actual_path).stem}-{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns() % 10**6}.png"
@@ -225,6 +239,28 @@ def compare(root: Path, ref_path: Path, actual_path: Path, out: Path | None = No
 
 
 # ------------------------------------------------------------------------------ captura
+def device_screenshot(platform: str, out: Path, device: str | None = None) -> Path:
+    """Captura del simulador de iOS (xcrun simctl) o del emulador/dispositivo Android (adb)."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if platform == "ios":
+        if not shutil.which("xcrun"):
+            raise SystemExit("Necesitas Xcode (xcrun simctl) y un simulador abierto.")
+        r = subprocess.run(["xcrun", "simctl", "io", device or "booted", "screenshot", "--type=png", str(out)],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            raise SystemExit("No se pudo capturar el simulador (¿hay uno iniciado?):\n" + (r.stderr or r.stdout)[-400:])
+        return out
+    if not shutil.which("adb"):
+        raise SystemExit("Necesitas adb (Android platform-tools) y un emulador o dispositivo conectado.")
+    cmd = ["adb"] + (["-s", device] if device else []) + ["exec-out", "screencap", "-p"]
+    r = subprocess.run(cmd, capture_output=True, timeout=60)
+    if r.returncode != 0 or not r.stdout.startswith(b"\x89PNG"):
+        raise SystemExit("No se pudo capturar con adb (¿emulador iniciado? `adb devices`):\n"
+                         + r.stderr.decode(errors="ignore")[-400:])
+    out.write_bytes(r.stdout)
+    return out
+
+
 def screenshot(url: str, out: Path, width: int = 1440, height: int = 900, full: bool = False) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     try:

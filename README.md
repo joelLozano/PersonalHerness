@@ -12,7 +12,7 @@ Tú ─► Claude Code (orquestador)
 Hooks: SessionStart inyecta el contexto del proyecto · UserPromptSubmit recupera memorias relevantes (auto-recall)
 ```
 
-El mismo `team.yaml` genera los archivos de cada IDE. Claude Code usa `.claude/` y `CLAUDE.md`; Kiro usa `.kiro/` (ver la sección 5). La memoria, el perfil y las tareas son los mismos para ambos.
+El mismo `team.yaml` genera los archivos de cada IDE. Claude Code usa `.claude/` y `CLAUDE.md`; Kiro usa `.kiro/` (ver la sección 6). La memoria, el perfil y las tareas son los mismos para ambos.
 
 ## 1. Instalación (una vez por máquina)
 
@@ -100,7 +100,74 @@ Código probable (lee solo estos rangos primero): src/lib/pricing.ts:1, src/app/
   - Para ver el resultado sin abrir el IDE: `agentes triage "texto"`.
   - Para desactivarlo: `settings.triage: false` en `team.local.yaml`.
 
-## 4. Diseño desde capturas y Figma
+## 4. Mobile nativo (iOS y Android) y design system
+
+```bash
+agentes install --ide kiro                 # en un proyecto con Xcode/SPM/Gradle activa el perfil mobile automáticamente
+agentes perfil set mobile                  # o elegirlo a mano (agentes perfil list | set ninguno)
+```
+**Perfil mobile.** Se aplica encima del equipo base, así que los proyectos web no se ven afectados.
+- **Agentes:**
+  - `ios-dev` (Swift, SwiftUI/UIKit, XCTest) y `android-dev` (Kotlin, Compose/Views, JUnit/Espresso) reemplazan a `frontend-dev` y `fullstack-dev`.
+  - El diseñador sigue las guías de Apple (HIG) y Material 3.
+  - Seguridad aplica OWASP MASVS (Keychain/Keystore, ATS, componentes exportados).
+  - DevOps usa Fastlane, firma de apps, TestFlight y Play Console.
+- **Kickoff mobile:** SwiftUI o UIKit, Compose o Views, versiones mínimas, arquitectura, DI, modo offline, design system, dispositivos y publicación.
+- **Escaneo:**
+  - Detecta Xcode/SPM/CocoaPods y Gradle.
+  - Lee SwiftUI o UIKit, Compose o Views, iOS mínimo, minSdk/targetSdk, módulos Gradle, esquemas de Xcode, librerías y lanes de Fastlane.
+  - Genera los **comandos reales** de build y test, por ejemplo `xcodebuild -scheme … test` y `./gradlew testDebugUnitTest`.
+  - Crea un mapa del código que entiende los paquetes de Android.
+- **Recetas de Kiro por plataforma:** las tareas se marcan con `[ios]`, `[android]` o `[backend]`, y las ramas sin tareas terminan sin explorar.
+- **Capturas para la verificación visual:**
+  - `agentes design shot --ios` captura el simulador (`xcrun simctl`).
+  - `agentes design shot --android` captura el emulador (`adb`).
+  - `agentes design compare <ref> <captura> --movil` ignora la barra de estado y el indicador de inicio.
+- **`requisitos.sh`:** revisa Xcode, CocoaPods, SwiftLint, Fastlane, JDK 17+, adb y el Android SDK, solo si el proyecto los usa.
+
+### Tu design system siempre presente
+El DS puede estar en un lugar distinto en cada proyecto: un módulo del repo, un paquete SPM, un módulo Gradle o una ruta externa. `agentes install` lo **detecta** buscando carpetas o módulos llamados `DesignSystem`, `DS`, `UIKit`, `CoreUI` o `:core:designsystem`. También puedes indicarlo a mano:
+```bash
+agentes ds index --ios Modules/DesignSystem --android core/designsystem   # se guarda en team.local.yaml
+agentes ds show            # catálogo compacto     · agentes ds map    # mapeo nativo → DS
+agentes ds lookup "botón primario" -P android      # firma completa, doc, archivo:línea y un ejemplo real de uso
+agentes ds check           # revisa los cambios: nativos con equivalente en el DS, colores/fuentes/espaciados literales
+```
+| Qué se indexa | iOS | Android |
+|---|---|---|
+| Componentes | `public struct X: View` (SwiftUI), subclases de `UIView` (UIKit), estilos y modificadores (`extension View`) | `@Composable` públicos (sin previews), `View`s personalizadas |
+| Tokens | colorsets de `.xcassets` (claro y oscuro), `extension Color/Font`, enums de espaciado y tipografía | `Color(0x…)`, objetos `*Spacing`, `TextStyle`, `colors.xml`, `dimens.xml` |
+| Mapeo nativo → DS | `Button`→`DSButton`, `Text`/`UILabel`→`DSText`… | `Button`/`OutlinedButton`/`TextButton`→`DsButton`, `Card`→`DsCard`, XML `<TextView>`… |
+
+**Cómo se mantiene en contexto gastando poco:**
+- **Al iniciar sesión:** solo una línea, del tipo "DS indexado: iOS 24 componentes…" (~30 tokens).
+- **En tareas de UI** (pantallas, botones, componentes, diseño):
+  - El triaje agrega el **catálogo compacto** (~250–600 tokens, según el tamaño del DS), filtrado por plataforma si mencionas iOS o Android.
+  - Agrega también los 3 componentes más relevantes con su firma completa.
+  - En la misma sesión, el catálogo se envía una sola vez; después solo los componentes relevantes.
+- **En tareas que no son de UI** (red, datos, bugs de lógica): no se agrega nada del DS.
+- **Detalle bajo demanda:** la herramienta `ds_lookup` da la firma, la documentación y un ejemplo real de uso en tu código.
+
+**Cumplimiento automático:**
+- Al terminar cada turno, el hook `Stop` (en Claude Code y en Kiro) ejecuta `ds check` sobre los cambios. Si encuentra componentes nativos con equivalente en el DS o colores literales, **el agente lo corrige antes de entregarte el trabajo**.
+- Bloquea como máximo 2 veces seguidas, para evitar bucles.
+- Para excepciones intencionales, marca la línea con `// ds-ignore`.
+- Se ignoran los previews, los tests y el propio módulo del DS.
+- **Avisos:** los tamaños de fuente y los espaciados literales salen solo como aviso, y únicamente si tu DS define esos tokens.
+
+Ajustes en `team.local.yaml`:
+```yaml
+settings:
+  design_system:
+    ios: [Modules/DesignSystem, Modules/Icons]
+    android: core/designsystem
+    map: {Button: PrimaryButton}    # corrige el mapeo automático
+    ignore: [Image]                 # nativos permitidos
+  ds_check_on_stop: true
+```
+El índice se actualiza solo, de forma incremental, cuando el DS cambia: al iniciar sesión o con `agentes index`.
+
+## 5. Diseño desde capturas y Figma
 
 Una imagen pegada en el chat solo la ve esa conversación: los sub-agentes, los pasos de un workflow y las sesiones siguientes no la ven. Por eso las referencias se **registran**:
 
@@ -149,7 +216,7 @@ Para obtener la URL, en Figma haz clic derecho en el frame → *Copy link to sel
 
 Si decides usarlo, agrégalo como servidor MCP en el IDE: en `.mcp.json` para Claude Code o en `.kiro/settings/mcp.json` para Kiro. El harness conserva los servidores que agregues. Después, importa el plugin desde su manifest en Figma Desktop: *Plugins → Development → Import plugin from manifest*.
 
-## 5. Kiro: Specs, sub-agentes y Workflows
+## 6. Kiro: Specs, sub-agentes y Workflows
 
 ```bash
 agentes install --ide kiro      # o --ide ambos; sin --ide se detecta (.kiro/, .claude/, CLI instalados)
@@ -186,7 +253,7 @@ agentes ide add kiro            # agregar Kiro a un proyecto que ya tiene el har
   Los comandos (`/feature`, `/fix`…) detectan esto y trabajan solo con sub-agentes.
 - **Modelos:** por defecto los agentes heredan el modelo de la sesión de Kiro. Para fijar uno, usa `kiro_model: claude-sonnet-4.6` en el agente dentro de `team.local.yaml`.
 
-## 6. Migrar configuraciones y archivos .md existentes
+## 7. Migrar configuraciones y archivos .md existentes
 
 `agentes install` detecta si el proyecto ya tiene configuraciones de agentes y te ofrece sustituirlas por el equipo (s/n). También puedes hacerlo cuando quieras:
 
@@ -248,7 +315,7 @@ Hábitos que también ayudan:
 - Desactiva los servidores MCP que no uses.
 - Ejecuta `/retro` para mantener la memoria corta.
 
-## 7. Memoria y contexto
+## 8. Memoria y contexto
 
 - **Una base de datos por proyecto** (`.agentes/agentes.db`), con estos tipos de memoria: `rule` (reglas siempre presentes), `decision`, `convention`, `design`, `requirement`, `bug`, `security`, `learning`, `profile`, `scan`, `code`, `spec` (specs de Kiro) y `note`.
 - **Búsqueda híbrida**: combina vectores (ChromaDB) con BM25 (SQLite FTS5) mediante Reciprocal Rank Fusion.
@@ -284,7 +351,7 @@ Si cambias el modelo, ejecuta `agentes memory rebuild`. Cada modelo tiene su pro
 - **Protocolo común**: todos los agentes leen el contexto antes de trabajar y guardan solo conocimiento durable al terminar.
 - **Compartir con tu equipo**: la base de datos no se sube a git. Usa `agentes memory export` para generar `.agentes/memory.json` y súbelo; quien lo reciba ejecuta `agentes memory import`.
 
-## 8. Comandos para modificar y mejorar el harness
+## 9. Comandos para modificar y mejorar el harness
 
 ### Instalación y mantenimiento
 ```bash
@@ -295,7 +362,7 @@ agentes requisitos                                # software del harness + del p
 agentes requisitos --check | --yes | --solo-requeridos | --lista
 agentes uninstall [--purge]                       # quitar del proyecto (--purge borra también la memoria)
 agentes ide list | add kiro | remove claude       # IDEs para los que se genera el equipo
-agentes migrate [--apply] [--keep] [--include G]  # migrar .md y configuraciones previas (ver sección 6)
+agentes migrate [--apply] [--keep] [--include G]  # migrar .md y configuraciones previas (ver sección 7)
 ./install.sh                                      # reinstalar el CLI (por ejemplo, tras añadir dependencias)
 ```
 
@@ -356,7 +423,9 @@ agentes memory profile [clave valor --tags seccion]   # ver o editar el perfil
 agentes memory export [archivo] · import [archivo] · rebuild   # rebuild: re-vectorizar (tras cambiar de modelo)
 agentes bench [--modelos bm25,ingles,multilingue] [--queries archivo.yaml]   # ¿conviene la búsqueda vectorial?
 agentes triage "texto de la tarea" [--tipo fix]  # tipo, peso XS-XL, ruta y código probable
-agentes design ref <img> | list | compare <ref> <captura> | shot <url> | figma <url>   # diseño desde referencias
+agentes design ref <img> | list | compare <ref> <captura> [--movil] | shot <url> | shot --ios|--android | figma <url>
+agentes perfil list | set mobile | set ninguno     # perfiles del equipo (mobile nativo)
+agentes ds index [--ios R] [--android R] | show | lookup <q> | check [--todo] | map   # design system
 agentes task add "Paginar productos" -a backend-dev -p alta -f catalogo
 agentes task list [--all] [-s doing] · set <id> <estado> [nota] · done <ids> · show <id>
 ```
@@ -370,7 +439,7 @@ agentes task list [--all] [-s doing] · set <id> <estado> [nota] · done <ids> �
      auto_recall: false
    ```
 
-## 9. Estructura
+## 10. Estructura
 
 ```
 agentes/
@@ -381,6 +450,8 @@ agentes/
   migrate.py       # detección, migración a la BD, respaldo y restauración de configuraciones previas
   embeddings.py    # modelos de embeddings (multilingüe con fastembed, inglés de ChromaDB)
   bench.py         # benchmark BM25 vs búsqueda híbrida
+  ds.py            # design system: índice, catálogo compacto, lookup, verificación de uso
+  profiles/mobile.yaml  # perfil mobile nativo (iOS/Android) que se fusiona sobre team.yaml
   design.py        # referencias visuales: paleta exacta, comparación visual, capturas, importación de Figma
   triage.py        # triaje: tipo y peso de la tarea, ruta más barata y localización de código
   store.py         # memoria: SQLite + FTS5 + ChromaDB (híbrida), perfil, tareas

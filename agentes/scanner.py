@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 from collections import Counter
@@ -21,8 +22,23 @@ LANG_BY_EXT = {
     ".svelte": "Svelte", ".c": "C", ".h": "C", ".cpp": "C++", ".hpp": "C++", ".scala": "Scala",
     ".ex": "Elixir", ".exs": "Elixir", ".sql": "SQL", ".css": "CSS", ".scss": "SCSS", ".html": "HTML",
     ".sh": "Shell", ".tf": "Terraform", ".prisma": "Prisma", ".graphql": "GraphQL",
+    ".m": "Objective-C", ".mm": "Objective-C++", ".kts": "Kotlin",
 }
-CODE_EXTS = set(LANG_BY_EXT) | {".md", ".yaml", ".yml", ".toml", ".json"}
+CODE_EXTS = set(LANG_BY_EXT) | {".md", ".yaml", ".yml", ".toml", ".json", ".xml", ".strings", ".gradle", ".plist"}
+
+# ---- mobile ----
+IOS_LIBS = {"alamofire": "Alamofire", "kingfisher": "Kingfisher", "snapkit": "SnapKit", "rxswift": "RxSwift",
+            "swift-composable-architecture": "TCA", "swift-snapshot-testing": "SnapshotTesting", "quick": "Quick",
+            "nimble": "Nimble", "firebase-ios-sdk": "Firebase", "firebase": "Firebase", "realm": "Realm",
+            "lottie": "Lottie", "swinject": "Swinject", "factory": "Factory", "sdwebimage": "SDWebImage", "moya": "Moya",
+            "swiftlint": "SwiftLint", "swift-dependencies": "swift-dependencies", "grdb": "GRDB"}
+ANDROID_LIBS = {"androidx.compose": "Jetpack Compose", "hilt": "Hilt", "koin": "Koin", "dagger": "Dagger",
+                "retrofit": "Retrofit", "okhttp": "OkHttp", "ktor": "Ktor", "androidx.room": "Room", "room-": "Room",
+                "kotlinx-coroutines": "Coroutines", "coil": "Coil", "glide": "Glide", "paparazzi": "Paparazzi",
+                "roborazzi": "Roborazzi", "robolectric": "Robolectric", "espresso": "Espresso", "turbine": "Turbine",
+                "mockk": "MockK", "detekt": "detekt", "ktlint": "ktlint", "firebase": "Firebase",
+                "navigation-compose": "Navigation Compose", "kotlinx-serialization": "kotlinx.serialization",
+                "moshi": "Moshi", "gson": "Gson", "datastore": "DataStore", "work-runtime": "WorkManager"}
 
 # dependencia -> etiqueta de framework
 FRAMEWORKS = {
@@ -87,7 +103,7 @@ ROLES = [
     ("API / rutas", r"(^|/)(api|routes?|controllers?|endpoints?|handlers?|resolvers?|graphql)(/|$)"),
     ("páginas / vistas", r"(^|/)(pages|app|views?|screens?|routes)(/|$)"),
     ("componentes UI", r"(^|/)(components?|ui|widgets?|layouts?)(/|$)"),
-    ("datos / modelos", r"(^|/)(models?|entities|schemas?|prisma|db|database|migrations?|repositor(y|ies)|dao)(/|$)"),
+    ("datos / modelos", r"(^|/)(models?|entities|schemas?|prisma|db|database|migrations?|repositor(y|ies)|dao|data|persistence|storage)(/|$)"),
     ("servicios / lógica", r"(^|/)(services?|domain|core|use-?cases?|business|lib)(/|$)"),
     ("autenticación", r"(^|/)(auth|authentication|login|session|security)(/|$)"),
     ("estado (frontend)", r"(^|/)(store|stores|state|redux|context|hooks?)(/|$)"),
@@ -96,16 +112,51 @@ ROLES = [
     ("pruebas", r"(^|/)(tests?|__tests__|spec|specs|e2e|cypress|playwright)(/|$)"),
     ("configuración / infra", r"(^|/)(config|configs?|infra|deploy|docker|k8s|terraform|\.github)(/|$)"),
     ("scripts / jobs", r"(^|/)(scripts?|jobs?|workers?|cron|tasks?|queues?)(/|$)"),
+    ("design system / tema", r"(^|/)(design-?system|ds|ui-?kit|core-?ui|ui-?components|theme)(/|$)"),
+    ("pantallas", r"(^|/)(screens?|scenes?|features?|feature)(/|$)"),
+    ("ViewModels / presentación", r"(^|/)(view-?models?|presenters?|presentation)(/|$)"),
+    ("navegación", r"(^|/)(navigation|coordinators?|routers?|routing|nav)(/|$)"),
+    ("red / networking", r"(^|/)(network|networking|remote|api-?client)(/|$)"),
+    ("inyección de dependencias", r"(^|/)(di|injection)(/|$)"),
+    ("recursos", r"(^|/)(resources|res|assets\.xcassets|values|drawable)(/|$)"),
 ]
-ENTRY = r"(^|/)(main|index|app|server|manage|wsgi|asgi|program|cli)\.(py|ts|tsx|js|jsx|go|rs|java|kt|rb|php|cs)$"
+ENTRY = (r"(^|/)(main|index|app|server|manage|wsgi|asgi|program|cli)\.(py|ts|tsx|js|jsx|go|rs|java|kt|rb|php|cs)$"
+         r"|(^|/)(AppDelegate|SceneDelegate|\w+App)\.swift$|(^|/)(MainActivity|\w+Application)\.kt$|(^|/)src/main/AndroidManifest\.xml$")
+SUFFIX_ROLES = [("pantallas", r"(Screen|View|ViewController|Activity|Fragment|Page)$"),
+                ("ViewModels / presentación", r"(ViewModel|Presenter|Store|Reducer)$"),
+                ("datos / modelos", r"(Repository|Dao|Entity|Model|DataSource)$"),
+                ("red / networking", r"(Api|Client|Service|Endpoint)$"),
+                ("entrada de la app", r"^(MainActivity|AppDelegate|SceneDelegate|\w+App|\w+Application)$")]
+BUILD_FILES = {"build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "Package.swift", "Podfile",
+               "Fastfile", "Project.swift"}
+ANDROID_SRC = re.compile(r"^(.*?/src/(?:main|debug|release)/(?:java|kotlin))/(.+)$")
 
 
 def code_map(root: Path, files: list[Path], max_lines: int = 18) -> list[str]:
     """Qué hay en cada carpeta del código: rol probable, tamaño y archivos de ejemplo."""
     groups: dict[str, list[str]] = {}
+    rels = [f.relative_to(root).as_posix() for f in files if f.suffix.lower() in LANG_BY_EXT]
+    # Android: los paquetes (com/empresa/app/...) son profundos; agrupa por la carpeta tras la raíz común del módulo
+    pkg_root: dict[str, str] = {}
+    by_src: dict[str, list[str]] = {}
+    for r in rels:
+        m = ANDROID_SRC.match(r)
+        if m:
+            by_src.setdefault(m.group(1), []).append(m.group(2))
+    for base, paths in by_src.items():
+        dirs = [p.rsplit("/", 1)[0] if "/" in p else "" for p in paths]
+        common = os.path.commonpath(dirs) if all(dirs) else ""
+        pkg_root[base] = f"{base}/{common}".rstrip("/")
     for f in files:
         rel = f.relative_to(root).as_posix()
-        if f.suffix.lower() not in LANG_BY_EXT or rel.startswith((".kiro/", ".claude/", ".github/")):
+        if f.suffix.lower() not in LANG_BY_EXT or rel.startswith((".kiro/", ".claude/", ".github/")) \
+                or f.name in BUILD_FILES:
+            continue
+        m = ANDROID_SRC.match(rel)
+        if m and m.group(1) in pkg_root:
+            sub = rel[len(pkg_root[m.group(1)]) + 1:]
+            key = pkg_root[m.group(1)] + ("/" + sub.split("/")[0] if "/" in sub else "")
+            groups.setdefault(key, []).append(rel)
             continue
         parts = rel.split("/")
         depth = 3 if parts[0] in ("src", "app", "packages", "apps", "lib", "internal", "pkg") else 2
@@ -113,10 +164,18 @@ def code_map(root: Path, files: list[Path], max_lines: int = 18) -> list[str]:
         groups.setdefault(key, []).append(rel)
     lines = []
     for key, rels in sorted(groups.items(), key=lambda kv: -len(kv[1]))[:max_lines]:
-        roles = [name for name, pat in ROLES if re.search(pat, key + "/", re.I)]
-        if not roles:  # inferir por nombres de archivo
-            joined = " ".join(rels).lower()
-            roles = [name for name, pat in ROLES if re.search(pat.replace("(^|/)", "(^|/|_|-)"), joined)][:1]
+        segs = [x for x in key.split("/") if x and x != "."]
+        roles = []
+        for seg in reversed(segs[-2:]):  # el rol lo da la carpeta final (no "app/" o "core/" como módulo)
+            roles = [name for name, pat in ROLES if re.search(pat, "/" + seg + "/", re.I)]
+            if roles:
+                break
+        if not roles:  # inferir por sufijos de los nombres de archivo
+            names = [Path(r).stem for r in rels]
+            for name, rx in SUFFIX_ROLES:
+                if sum(bool(re.search(rx, n)) for n in names) >= max(1, len(names) // 3):
+                    roles.append(name)
+            roles = roles[:2]
         sample = ", ".join(sorted({Path(r).name for r in rels}, key=len)[:4])
         lines.append(f"{key}/ — {' + '.join(roles[:2]) or 'código'} ({len(rels)} arch.; ej. {sample})")
     entries = sorted({f.relative_to(root).as_posix() for f in files if re.search(ENTRY, f.relative_to(root).as_posix())},
@@ -124,6 +183,82 @@ def code_map(root: Path, files: list[Path], max_lines: int = 18) -> list[str]:
     if entries:
         lines.append("Puntos de entrada: " + ", ".join(entries))
     return lines
+
+
+def mobile_scan(root: Path, files: list[Path], rel: set[str]) -> dict:
+    """Detecta proyectos iOS y Android: UI, versiones mínimas, librerías, esquemas/módulos y comandos reales."""
+    out: dict = {}
+    swift = [f for f in files if f.suffix == ".swift"]
+    pbx = [f for f in files if f.name == "project.pbxproj"]
+    pkg = root / "Package.swift"
+    if swift or pbx or pkg.exists() or "Podfile" in rel:
+        ios: dict = {}
+        ui = {"SwiftUI": 0, "UIKit": 0}
+        for f in swift[:400]:
+            t = _read(f, 80_000)
+            ui["SwiftUI"] += "import SwiftUI" in t
+            ui["UIKit"] += "import UIKit" in t
+        ios["ui"] = "SwiftUI + UIKit" if ui["SwiftUI"] and ui["UIKit"] else ("SwiftUI" if ui["SwiftUI"] else ("UIKit" if ui["UIKit"] else "?"))
+        targets = []
+        for f in pbx:
+            targets += re.findall(r"IPHONEOS_DEPLOYMENT_TARGET = ([\d.]+);", _read(f, 3_000_000))
+        targets += re.findall(r"\.iOS\(\.v(\d+)", _read(pkg))
+        if targets:
+            ios["min_ios"] = min(targets, key=lambda v: [int(x) for x in v.split(".")])
+        projects = sorted({f.parent.name for f in pbx if f.parent.suffix == ".xcodeproj"})
+        workspaces = sorted({p.split("/")[0] for p in rel if ".xcworkspace/" in p and "xcodeproj" not in p.split("/")[0]})
+        schemes = sorted({Path(p).stem for p in rel if p.endswith(".xcscheme")})
+        ios.update({"proyectos": projects, "workspaces": workspaces, "esquemas": schemes[:8]})
+        libs = set()
+        deps_text = " ".join(_read(root / n).lower() for n in ("Package.swift", "Package.resolved", "Podfile.lock", "Cartfile"))
+        deps_text += " ".join(_read(root / p).lower() for p in rel if p.endswith("Package.resolved"))
+        for k, v in IOS_LIBS.items():
+            if re.search(rf"[\"/ ]{re.escape(k)}[\"/. ]", deps_text):
+                libs.add(v)
+        ios["librerias"] = sorted(libs)
+        ios["gestor"] = [g for g, cond in (("SPM", pkg.exists() or any(p.endswith("Package.resolved") for p in rel)),
+                                            ("CocoaPods", "Podfile" in rel), ("Carthage", "Cartfile" in rel),
+                                            ("Tuist", "Project.swift" in rel)) if cond]
+        scheme = schemes[0] if schemes else (projects[0].replace(".xcodeproj", "") if projects else "<Esquema>")
+        container = f"-workspace {workspaces[0]}" if workspaces else (f"-project {projects[0]}" if projects else "")
+        dest = "-destination 'platform=iOS Simulator,name=iPhone 16'"
+        ios["comandos"] = {"build": f"xcodebuild {container} -scheme {scheme} {dest} build".replace("  ", " "),
+                           "test": f"xcodebuild {container} -scheme {scheme} {dest} test".replace("  ", " ")}
+        if ".swiftlint.yml" in rel:
+            ios["comandos"]["lint"] = "swiftlint"
+        out["ios"] = ios
+    gradle_settings = next((root / n for n in ("settings.gradle.kts", "settings.gradle") if (root / n).exists()), None)
+    manifests = [p for p in rel if p.endswith("AndroidManifest.xml")]
+    if manifests or (gradle_settings and "android" in " ".join(_read(f) for f in files if f.name.startswith("build.gradle")).lower()):
+        an: dict = {}
+        st = _read(gradle_settings) if gradle_settings else ""
+        modules = re.findall(r"['\"](:[\w:-]+)['\"]", " ".join(re.findall(r"include\s*\(?([^\n]+)", st)))
+        an["modulos"] = modules[:30]
+        gtext = " ".join(_read(f) for f in files if f.name in ("build.gradle", "build.gradle.kts"))
+        toml = _read(root / "gradle" / "libs.versions.toml")
+        alltext = (gtext + " " + toml).lower()
+        for key, name in (("min_sdk", "minsdk"), ("target_sdk", "targetsdk"), ("compile_sdk", "compilesdk")):
+            vals = re.findall(name + r'(?:version)?\s*(?:=|:)?\s*\(?\s*"?(\d+)', alltext)
+            if vals:
+                an[key] = min(vals, key=int) if key == "min_sdk" else max(vals, key=int)
+        kt = [f for f in files if f.suffix == ".kt"]
+        compose = "androidx.compose" in alltext or "compose = true" in alltext or any("@Composable" in _read(f, 60_000) for f in kt[:200])
+        views = sum(1 for p in rel if "/res/layout" in p and p.endswith(".xml"))
+        an["ui"] = "Compose + Views" if compose and views else ("Jetpack Compose" if compose else ("Views XML" if views else "?"))
+        an["librerias"] = sorted({v for k, v in ANDROID_LIBS.items() if k in alltext})
+        app_mod = next((m for m in modules if m in (":app", ":androidApp")), ":app")
+        cmds = {"build": f"./gradlew {app_mod}:assembleDebug", "test": "./gradlew testDebugUnitTest",
+                "ui-test": "./gradlew connectedDebugAndroidTest", "lint": "./gradlew lint"}
+        if "detekt" in alltext:
+            cmds["detekt"] = "./gradlew detekt"
+        if "ktlint" in alltext:
+            cmds["ktlint"] = "./gradlew ktlintCheck"
+        an["comandos"] = cmds
+        out["android"] = an
+    fastfile = next((root / p for p in rel if p.endswith("Fastfile")), None)
+    if fastfile:
+        out["fastlane_lanes"] = re.findall(r"lane\s+:(\w+)", _read(fastfile))[:15]
+    return out
 
 
 def scan(root: Path) -> dict:
@@ -173,6 +308,17 @@ def scan(root: Path) -> dict:
         if "/" in dep or dep in ("actix-web", "axum", "tokio", "rails", "spring-boot"):
             if dep in other:
                 frameworks.add(fw)
+    mob = mobile_scan(root, files, rel)
+    if mob:
+        report["mobile"] = mob
+        for plat in ("ios", "android"):
+            if plat in mob:
+                frameworks |= set(mob[plat].get("librerias", []))
+                if mob[plat].get("ui", "?") != "?":
+                    frameworks |= set(mob[plat]["ui"].replace(" + ", ",").replace("Views XML", "Android Views").split(","))
+                scripts[plat] = mob[plat]["comandos"]
+        if mob.get("fastlane_lanes"):
+            scripts["fastlane"] = {l: f"bundle exec fastlane {l}" for l in mob["fastlane_lanes"]}
     report["frameworks"] = sorted(frameworks)
     report["package_managers"] = sorted(managers)
     report["scripts"] = scripts
@@ -198,11 +344,11 @@ def scan(root: Path) -> dict:
         report["ci_workflows"] = workflows
     report["infra"] = sorted(set(infra))
 
-    tests = [r for r in rel if re.search(r"(^|/)(tests?|__tests__|spec|e2e)(/|$)|[._-](test|spec)\.[a-z]+$|^test_.*\.py$|/test_[^/]*\.py$", r)]
+    tests = [r for r in rel if re.search(r"(^|/)(tests?|__tests__|spec|e2e|androidTest|\w+Tests|\w+UITests)(/|$)|Tests?\.swift$|Test\.kt$|[._-](test|spec)\.[a-z]+$|^test_.*\.py$|/test_[^/]*\.py$", r)]
     report["test_files"] = len(tests)
     report["test_sample"] = tests[:10]
 
-    lint = [n for n in (".eslintrc", ".eslintrc.js", ".eslintrc.json", "eslint.config.js", "eslint.config.mjs",
+    lint = [n for n in (".swiftlint.yml", ".swiftformat", "detekt.yml", "config/detekt/detekt.yml", ".eslintrc", ".eslintrc.js", ".eslintrc.json", "eslint.config.js", "eslint.config.mjs",
                         ".prettierrc", "prettier.config.js", "biome.json", "ruff.toml", ".flake8", "mypy.ini",
                         "tsconfig.json", ".editorconfig", ".pre-commit-config.yaml", "golangci.yml", ".rubocop.yml")
             if n in rel]
@@ -255,6 +401,15 @@ def report_to_text(r: dict) -> str:
                        ("infra", "Infra/CI"), ("quality_tools", "Calidad (lint/format/types)")):
         if r.get(key):
             L.append(f"{label}: {', '.join(r[key])}")
+    mob = r.get("mobile") or {}
+    if mob.get("ios"):
+        i = mob["ios"]
+        L.append(f"iOS: UI {i.get('ui')} · mínimo iOS {i.get('min_ios', '?')} · {', '.join(i.get('gestor', [])) or '?'} · "
+                 f"esquemas {', '.join(i.get('esquemas', [])) or '?'}")
+    if mob.get("android"):
+        a = mob["android"]
+        L.append(f"Android: UI {a.get('ui')} · minSdk {a.get('min_sdk', '?')} · targetSdk {a.get('target_sdk', '?')} · "
+                 f"módulos {', '.join(a.get('modulos', [])) or '?'}")
     if r.get("scripts"):
         for f, s in r["scripts"].items():
             L.append(f"Scripts ({f}): " + "; ".join(f"{k}=`{v}`" for k, v in list(s.items())[:15]))
@@ -300,6 +455,15 @@ def save_scan(store: Store, r: dict) -> None:
         facts.append("Targets de Makefile: " + ", ".join(r["make_targets"]))
     if r.get("infra"):
         facts.append("Infraestructura/CI: " + ", ".join(r["infra"]))
+    mob = r.get("mobile") or {}
+    if mob.get("ios"):
+        i = mob["ios"]
+        facts.append(f"iOS: UI {i.get('ui')}, iOS mínimo {i.get('min_ios', '?')}, gestor {', '.join(i.get('gestor', [])) or '?'}, "
+                     f"esquemas {', '.join(i.get('esquemas', [])) or '?'}, librerías {', '.join(i.get('librerias', [])) or '-'}.")
+    if mob.get("android"):
+        a = mob["android"]
+        facts.append(f"Android: UI {a.get('ui')}, minSdk {a.get('min_sdk', '?')}, targetSdk {a.get('target_sdk', '?')}, "
+                     f"módulos {', '.join(a.get('modulos', [])[:12]) or '?'}, librerías {', '.join(a.get('librerias', [])) or '-'}.")
     if r.get("quality_tools"):
         facts.append("Herramientas de calidad configuradas: " + ", ".join(r["quality_tools"]))
     facts.append(f"El proyecto tiene {r.get('test_files', 0)} archivos de prueba.")

@@ -79,6 +79,23 @@ def _locate(query: str, k: int = 6):
     return "\n".join(f"{f['archivo']}:{','.join(f['lineas'])}" for f in files) or "Sin coincidencias (¿falta `agentes index`?)."
 
 
+@tool("ds_lookup", _s(
+    "Design system del proyecto: firma completa, documentación, ubicación y ejemplo de uso de componentes; o tokens "
+    "(colores, tipografía, espaciado). Úsalo antes de escribir UI.",
+    query={"type": "string", "required": True, "description": "Nombre (DSButton) o descripción ('botón primario', 'colores')"},
+    platform={"type": "string", "enum": ["ios", "android"]},
+))
+def _ds_lookup(query: str, platform: str | None = None):
+    from .ds import lookup
+    return lookup(store().root, query, platform)
+
+
+@tool("ds_check", _s("Revisa los cambios actuales: usos de componentes nativos o valores literales que deberían usar el design system."))
+def _ds_check():
+    from .ds import check, render_check
+    return render_check(check(store().root))
+
+
 @tool("triage", _s(
     "Clasifica una tarea: tipo (fix, feature, update, refactor, ajuste...), peso XS-XL, ruta más barata y archivos probables.",
     task={"type": "string", "required": True},

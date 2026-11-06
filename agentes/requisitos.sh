@@ -94,11 +94,19 @@ docker|recomendado|-|docker --version|cask:docker|fn:docker|Dockerfile,docker-co
 go|requerido|1.21|go version|brew:go|pkg:golang|go.mod|Go
 cargo|requerido|-|cargo --version|fn:rust|fn:rust|Cargo.toml|Rust (cargo + rustc)
 poetry|requerido|-|poetry --version|fn:poetry|fn:poetry|poetry.lock|Poetry
-java|requerido|17|java -version|brew:openjdk@21|pkg:default-jdk|pom.xml,build.gradle,build.gradle.kts|Java JDK
+java|requerido|17|java -version|brew:openjdk@21|pkg:default-jdk|pom.xml,build.gradle,build.gradle.kts,settings.gradle.kts|Java JDK (Gradle/Android requiere 17+)
 mvn|requerido|-|mvn --version|brew:maven|pkg:maven|pom.xml|Maven
 bundle|requerido|-|bundle --version|brew:ruby|pkg:ruby-bundler|Gemfile|Ruby + Bundler
 composer|requerido|-|composer --version|brew:composer|pkg:composer|composer.json|Composer (PHP)
 make|requerido|-|make --version|fn:xcode|pkg:make|Makefile|GNU Make
+xcode|requerido|15.0|ver_xcode_app|fn:xcode_app|-|*.xcodeproj,*.xcworkspace,Podfile|Xcode completo (compilar, simuladores, xcrun simctl)
+pod|requerido|-|pod --version|brew:cocoapods|-|Podfile|CocoaPods
+swiftlint|recomendado|-|swiftlint version|brew:swiftlint|-|.swiftlint.yml|SwiftLint
+swiftformat|opcional|-|swiftformat --version|brew:swiftformat|-|.swiftformat|SwiftFormat
+xcbeautify|opcional|-|xcbeautify --version|brew:xcbeautify|-|*.xcodeproj,*.xcworkspace|Salida legible de xcodebuild
+fastlane|recomendado|-|fastlane --version|brew:fastlane|cmd:sudo gem install fastlane|Fastfile|Fastlane (builds y publicación)
+adb|requerido|-|adb version|cask:android-platform-tools|pkg:adb|AndroidManifest.xml,settings.gradle.kts,settings.gradle|Android platform-tools (adb, capturas del emulador)
+android-sdk|requerido|-|ver_android_sdk|cask:android-commandlinetools|fn:android_sdk_linux|AndroidManifest.xml,settings.gradle.kts,settings.gradle|Android SDK (o Android Studio)
 EOF
   if [ -f "$PROJECT/.agentes/requisitos.conf" ]; then
     grep -v '^[[:space:]]*#' "$PROJECT/.agentes/requisitos.conf" | grep '|' || true
@@ -120,6 +128,16 @@ ver_fastembed() {
   local py; py="$(agentes_py)" || return 1
   "$py" -c 'import importlib.metadata as m; print(m.version("fastembed"))' 2>/dev/null
 }
+ver_xcode_app() {
+  xcodebuild -version 2>/dev/null | head -1 | grep -E "Xcode [0-9]" || return 1
+}
+ver_android_sdk() {
+  local d
+  for d in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "$HOME/Library/Android/sdk" "$HOME/Android/Sdk"; do
+    if [ -n "$d" ] && { [ -d "$d/platform-tools" ] || [ -d "$d/cmdline-tools" ]; }; then echo "instalado ($d)"; return 0; fi
+  done
+  return 1
+}
 ver_chromadb() {
   local bin py
   bin="$(command -v agentes)" || return 1
@@ -136,6 +154,17 @@ inst_claude()  { curl -fsSL https://claude.ai/install.sh | bash; }
 inst_bun()     { curl -fsSL https://bun.sh/install | bash; }
 inst_docker()  { curl -fsSL https://get.docker.com | ${SUDO:-}sh; }
 inst_rust()    { curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y; }
+inst_xcode_app() {
+  echo "Xcode se instala desde la App Store (unos 10 GB). Abriendo la página…"
+  open "macappstores://apps.apple.com/app/id497799835" 2>/dev/null || echo "Abre la App Store y busca Xcode."
+  echo "Después ejecuta: sudo xcodebuild -license accept && xcodebuild -runFirstLaunch"
+  return 1
+}
+inst_android_sdk_linux() {
+  echo "Instala Android Studio (incluye el SDK): sudo snap install android-studio --classic"
+  echo "o las command-line tools: https://developer.android.com/studio#command-line-tools-only"
+  return 1
+}
 inst_poetry()  { need uv && uv tool install poetry; }
 inst_agentes() {
   if [ -x "$HARNESS_DIR/install.sh" ]; then "$HARNESS_DIR/install.sh"
@@ -199,7 +228,8 @@ check_item() {
     case "$(command -v "$bin")" in /usr/bin/git|/usr/bin/python3|/usr/bin/make) return ;; esac
   fi
   out="$(eval "$vcmd" </dev/null 2>&1)" || return
-  VER="$(printf '%s' "$out" | grep -Eo '[0-9]+(\.[0-9]+)+' | head -1)"
+  VER="$(printf '%s' "$out" | grep -Eio 'version[ :"v]*[0-9]+(\.[0-9]+)*' | head -1 | grep -Eo '[0-9]+(\.[0-9]+)*')"
+  [ -z "$VER" ] && VER="$(printf '%s' "$out" | grep -Eo '[0-9]+(\.[0-9]+)+' | head -1)"
   [ -z "$VER" ] && VER="$(printf '%s' "$out" | grep -Eo '[0-9]+' | head -1)"
   [ -z "$VER" ] && VER="instalado"
   if [ "$min" = "-" ] || [ "$VER" = "instalado" ] || ver_ge "$VER" "$min"; then ST="ok"; else ST="old"; fi

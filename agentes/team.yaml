@@ -12,6 +12,7 @@ toolsets:
   readonly: [Read, Grep, Glob, Bash, WebFetch, WebSearch,
              mcp__agentes__project_context, mcp__agentes__memory_search, mcp__agentes__memory_add,
              mcp__agentes__memory_list, mcp__agentes__profile_get, mcp__agentes__code_locate, mcp__agentes__triage,
+             mcp__agentes__ds_lookup, mcp__agentes__ds_check,
              mcp__agentes__task_list, mcp__agentes__task_update, mcp__agentes__task_create]
   full: null
 
@@ -525,6 +526,7 @@ orchestrator: |
 
 # Ajustes de los hooks.
 settings:
+  ds_check_on_stop: true     # al terminar cada turno, revisa que la UI use el design system (si hay catálogo)
   triage: true               # añade a cada mensaje tipo, peso (XS-XL), ruta recomendada y código probable
   # Modelo de embeddings: multilingue (por defecto, ~220 MB) | multilingue-grande (~1 GB) | ingles (~80 MB)
   # o cualquier modelo de fastembed. Tras cambiarlo: `agentes memory rebuild`. Compara con `agentes bench`.

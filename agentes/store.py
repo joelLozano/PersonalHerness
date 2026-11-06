@@ -456,6 +456,13 @@ class Store:
             parts.append("## Perfil del proyecto\n" + "\n".join(lines))
         else:
             parts.append("## Perfil del proyecto\n(vacío) -> ejecuta /kickoff (proyecto nuevo) o /onboard (existente)")
+        try:
+            from .ds import load_catalog, summary_line
+            dsl = summary_line(load_catalog(self.root))
+            if dsl:
+                parts.append("## Design system\n" + dsl)
+        except Exception:
+            pass
         if cmap:
             parts.append("## Dónde está el código\n" + cmap[0].split("\n", 1)[-1][:1000]
                          + "\n(Si no te indican archivos: usa la herramienta code_locate antes de explorar.)")

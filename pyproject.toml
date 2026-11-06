@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentes"
-version = "0.6.0"
+version = "0.7.0"
 description = "Harness de equipo de desarrollo profesional (multi-agente) para Claude Code y Kiro, con memoria vectorial"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,4 +21,4 @@ agentes = "agentes.cli:main"
 packages = ["agentes"]
 
 [tool.setuptools.package-data]
-agentes = ["team.yaml", "requisitos.sh"]
+agentes = ["team.yaml", "requisitos.sh", "profiles/*.yaml"]

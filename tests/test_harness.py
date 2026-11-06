@@ -135,7 +135,7 @@ def test_kiro_generation(proj):
     assert steer.startswith("---\ninclusion: manual\n---") and "$ARGUMENTS" not in steer
     assert (proj / ".kiro/steering/agentes-equipo.md").read_text().startswith("---\ninclusion: always\n---")
     hooks = json.loads((proj / ".kiro/hooks/agentes.json").read_text())
-    assert hooks["version"] == "v1" and {h["trigger"] for h in hooks["hooks"]} == {"SessionStart", "UserPromptSubmit", "PostTaskExec"}
+    assert hooks["version"] == "v1" and {h["trigger"] for h in hooks["hooks"]} == {"SessionStart", "UserPromptSubmit", "Stop", "PostTaskExec"}
     wf = json.loads((proj / ".kiro/workflows/agentes-feature.workflow.json").read_text())
     assert wf["name"] == "agentes-feature" and wf["inputs"]["task"] == "prompt"
     assert "agentes" in json.loads((proj / ".kiro/settings/mcp.json").read_text())["mcpServers"]
@@ -367,3 +367,145 @@ def test_figma_offline():
     t = figma_tokens(node)
     assert t["colores"] == ["#FFFFFF", "#000000"] and t["tipografias"] == ["Inter 600 24px/32px"]
     assert t["radios"] == [12] and t["espaciados"] == [16]
+
+
+# ============================================================================ mobile + design system
+@pytest.fixture
+def mob(tmp_path):
+    import mobile_fixture
+    root = mobile_fixture.make(tmp_path / "app")
+    subprocess.run(["git", "init", "-q"], cwd=root)
+    subprocess.run(["git", "add", "-A"], cwd=root)
+    subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=t", "commit", "-qm", "init"], cwd=root)
+    return root
+
+
+def test_perfil_mobile(mob):
+    from agentes.installer import detect_profiles, load_team, set_ides, set_profiles
+    assert detect_profiles(mob) == ["mobile"]
+    t = load_team(None, ["mobile"])
+    activos = {n for n, a in t["agents"].items() if not a.get("disabled")}
+    assert {"ios-dev", "android-dev"} <= activos and not {"frontend-dev", "fullstack-dev"} & activos
+    assert "Proyecto MOBILE" in t["orchestrator"] and "Mobile / DS" in t["shared_protocol"]
+    assert "ios_ui" in [q["id"] for s in t["questions"]["new"] for q in s["items"]]
+    set_profiles(mob, ["mobile"])
+    set_ides(mob, ["claude", "kiro"])
+    res = sync(mob)
+    assert res["workflows"] == 5  # recetas mobile válidas (no usan agentes desactivados)
+    assert (mob / ".claude/agents/ios-dev.md").exists() and (mob / ".kiro/agents/android-dev.md").exists()
+    assert not (mob / ".claude/agents/frontend-dev.md").exists()
+    assert "android-dev" in (mob / ".kiro/workflows/agentes-feature-lite.workflow.json").read_text()
+    assert "MASVS" in (mob / ".claude/agents/security-engineer.md").read_text()
+    settings = json.loads((mob / ".claude/settings.json").read_text())
+    assert "Stop" in settings["hooks"]
+    assert any(h["trigger"] == "Stop" for h in json.loads((mob / ".kiro/hooks/agentes.json").read_text())["hooks"])
+    assert "DerivedData/" in (mob / ".kiroignore").read_text()
+
+
+def test_scan_mobile(mob):
+    r = scan(mob)
+    ios, an = r["mobile"]["ios"], r["mobile"]["android"]
+    assert ios["ui"] == "SwiftUI + UIKit" and ios["min_ios"] == "16.0" and ios["esquemas"] == ["Tienda"]
+    assert "Alamofire" in ios["librerias"] and "SPM" in ios["gestor"] and "-scheme Tienda" in ios["comandos"]["test"]
+    assert an["ui"] == "Jetpack Compose" and an["min_sdk"] == "26" and an["target_sdk"] == "35"
+    assert {"Hilt", "Retrofit", "Paparazzi"} <= set(an["librerias"]) and ":core:designsystem" in an["modulos"]
+    assert r["mobile"]["fastlane_lanes"] == ["beta", "release"]
+    cm = "\n".join(r["code_map"])
+    assert "Modules/DesignSystem/ — design system" in cm and "com/acme/tienda/data/ — datos" in cm
+    assert "build.gradle.kts" not in cm
+
+
+def test_ds_indice_catalogo_y_lookup(mob):
+    from agentes import ds
+    assert ds.detect(mob) == {"ios": ["Modules/DesignSystem"], "android": ["core/designsystem"]}
+    cat = ds.index(mob)
+    ios, an = cat["plataformas"]["ios"], cat["plataformas"]["android"]
+    nombres = {c["nombre"]: c for c in ios["componentes"]}
+    assert set(nombres) == {"DSButton", "DSText", "DSCard", "DSTextField", "DSBadgeView"}
+    assert nombres["DSCard"]["corta"] == "DSCard(padding:content:)" and nombres["DSBadgeView"]["tipo"] == "UIKit"
+    assert ios["modificadores"][0]["nombre"] == ".dsShadow"
+    assert ios["tokens"]["colores"]["Color.dsPrimary"].startswith("#22C55E")  # resuelto desde el xcassets
+    assert ios["tokens"]["espaciado"]["DSSpacing.m"] == "16"
+    dsb = next(c for c in an["componentes"] if c["nombre"] == "DsButton")
+    assert dsb["params"] == ["text", "onClick", "modifier", "variant", "enabled"]  # la flecha -> no rompe la firma
+    assert not any("Preview" in c["nombre"] or c["nombre"] == "InternalHelper" for c in an["componentes"])
+    assert an["tokens"]["colores"]["TextPrimary"] == "#0F172A"
+    assert ios["mapa"]["Button"] == ["DSButton"] and an["mapa"]["OutlinedButton"] == ["DsButton"]
+    comp = ds.compact(cat)
+    assert len(comp) < 2000 and "Button/UIButton → DSButton" in comp
+    assert "[Android]" not in ds.compact(cat, ["ios"])
+    look = ds.lookup(mob, "botón primario", "android")
+    assert "DsButton(text: String" in look and "CheckoutScreen.kt" in look  # ejemplo real de uso
+    assert "#0F172A" in ds.lookup(mob, "colores", "android")
+    assert ds.index(mob)["huella"] == cat["huella"]  # incremental: sin cambios no re-indexa
+
+
+def test_ds_check(mob):
+    from agentes import ds
+    ds.index(mob)
+    view = mob / "Tienda/Features/Checkout/CheckoutView.swift"
+    view.write_text(view.read_text() + (
+        "\nstruct Promo: View {\n    var body: some View {\n        VStack(spacing: 12) {\n"
+        "            Text(\"Promo\").foregroundColor(.red)\n            DSButton(title: \"OK\") {}\n"
+        "            Button(\"x\") {} // ds-ignore\n        }\n    }\n}\n\n#Preview {\n    Text(\"preview\")\n}\n"))
+    kt = mob / "app/src/main/java/com/acme/tienda/ui/checkout/CheckoutScreen.kt"
+    kt.write_text(kt.read_text() + "\n@Composable\nfun Banner() {\n    Card { Text(\"x\", color = Color(0xFFFF0000)) }\n}\n")
+    res = ds.check(mob)
+    found = {(Path(v["archivo"]).suffix, v["regla"], v["encontrado"]) for v in res["violaciones"]}
+    assert (".swift", "componente", "Text") in found and (".swift", "color", "color del sistema") in found
+    assert (".swift", "espaciado", "espaciado literal") in found
+    assert (".kt", "componente", "Card") in found and (".kt", "color", "color literal") in found
+    assert not any(v["encontrado"] == "Button" and v["archivo"].endswith(".swift") for v in res["violaciones"])  # ds-ignore
+    assert not any("preview" in v["codigo"] for v in res["violaciones"])
+    assert not any("DSButton" in v["codigo"] for v in res["violaciones"])
+    assert sum(v["regla"] == "color" and v["archivo"].endswith(".kt") for v in res["violaciones"]) == 1  # sin duplicados
+    assert ds.check(mob, files=["Modules/DesignSystem/Sources/DesignSystem/Components/DSButton.swift"])["estado"] == "ok"
+
+
+def test_hooks_design_system(mob):
+    import os
+    from agentes import ds
+    from agentes.installer import set_profiles
+    set_profiles(mob, ["mobile"])
+    sync(mob)
+    ds.index(mob)
+    env = {**os.environ, "AGENTES_NO_VECTORS": "1"}
+
+    def hook(event, payload, *extra):
+        return subprocess.run([sys.executable, "-m", "agentes", "hook", event, *extra], cwd=mob, capture_output=True,
+                              text=True, input=json.dumps({"cwd": str(mob), **payload}), env=env)
+    first = hook("prompt", {"prompt": "agrega un botón de cupón en la pantalla de checkout de iOS", "session_id": "s"}).stdout
+    assert "Design system del proyecto" in first and "[iOS] Componentes" in first and "[Android]" not in first
+    second = hook("prompt", {"prompt": "agrega un campo de texto para el cupón en la vista de iOS", "session_id": "s"}).stdout
+    assert "Design system del proyecto" not in second and "DSTextField" in second
+    assert "Design system" not in hook("prompt", {"prompt": "el repositorio de pedidos no reintenta si falla la red",
+                                                  "session_id": "s"}).stdout
+    assert hook("stop", {"session_id": "z"}).returncode == 0  # sin cambios → no bloquea
+    kt = mob / "app/src/main/java/com/acme/tienda/ui/checkout/CheckoutScreen.kt"
+    kt.write_text(kt.read_text() + "\n@Composable\nfun X() { Button(onClick = {}) {} }\n")
+    r = hook("stop", {"session_id": "z"})
+    assert r.returncode == 2 and "Button → usa DsButton" in r.stderr
+    assert hook("stop", {"session_id": "z", "stop_hook_active": True}).returncode == 0  # sin bucles
+    assert hook("stop", {"session_id": "k"}, "--kiro").returncode == 1
+    assert "Design system indexado" in Store(mob, use_vectors=False).context_summary()
+
+
+def test_captura_emulador_simulada(tmp_path, monkeypatch):
+    from agentes import design
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "adb").write_text("#!/bin/sh\nprintf '\\211PNG\\r\\n\\032\\nFAKE'\n")
+    (fake / "adb").chmod(0o755)
+    import os
+    monkeypatch.setenv("PATH", f"{fake}:{os.environ['PATH']}")
+    out = design.device_screenshot("android", tmp_path / "shot.png")
+    assert out.read_bytes().startswith(b"\x89PNG")
+
+
+def test_requisitos_mobile(mob):
+    script = Path(__file__).parent.parent / "agentes" / "requisitos.sh"
+    lista = subprocess.run(["bash", str(script), "--lista"], capture_output=True, text=True).stdout
+    assert all(x in lista for x in ("xcode", "pod", "adb", "android-sdk", "fastlane", "swiftlint"))
+    out = subprocess.run(["bash", str(script), "--check", "--proyecto", str(mob)], capture_output=True, text=True,
+                         env={"PATH": "/usr/bin:/bin", "HOME": str(mob), "NO_COLOR": "1"}).stdout
+    assert "adb" in out and "android-sdk" in out

@@ -25,9 +25,11 @@ TYPES: "OrderedDict[str, tuple[str, str]]" = OrderedDict([
     ("seguridad", (r"vulnerab|seguridad|security|owasp|audit|secreto|secret|inyecci|injection|xss|csrf|permisos? de acceso", "M")),
     ("fix", (r"\bbug|error|falla|fallo|\bfix|arregl|corrig|no funciona|not working|crash|excepci|exception|roto|broken|\b500\b|"
              r"undefined|null pointer|se cae|no carga|no guarda|no aparece|regresi|\bmal\b|incorrect|"
-             r"no se (aplica|muestra|calcula|actualiza|env[ií]a|guarda|carga|ve)|deber[ií]a (dar|mostrar|ser)|sale (mal|vac[ií])|no responde|no hace nada|no reacciona|se queda (cargando|colgad)", "S")),
+             r"no se (aplica|muestra|calcula|actualiza|env[ií]a|guarda|carga|ve)|deber[ií]a (dar|mostrar|ser)|sale (mal|vac[ií])|no responde|no hace nada|no reacciona|se queda (cargando|colgad)|\bcrash|crashea|\banr\b|se cierra|"
+             r"se congela|freeze|no compila|build fail|memory leak|fuga de memoria", "S")),
     ("issue", (r"\bissue|ticket|#\d+|reporte de|incidencia|jira", "S")),
-    ("update", (r"actualiz|upgrade|\bbump|dependenc|versi[oó]n|migrar a |migra a |deprecad|deprecat|\bupdate\b|configur|\.env|ci/cd|pipeline", "S")),
+    ("update", (r"actualiz|upgrade|\bbump|dependenc|versi[oó]n|migrar a |migra a |deprecad|deprecat|\bupdate\b|configur|\.env|ci/cd|pipeline|"
+                r"\bpods?\b|\bspm\b|swift package|gradle|\bagp\b|target ?sdk|min ?sdk|deployment target|xcode \d", "S")),
     ("refactor", (r"refactor|reorganiz|limpi|extrae|extract|simplific|deuda t|renombra.*(m[oó]dulo|carpeta)|desacopl", "M")),
     ("test", (r"\bprueba|\btest|cobertura|coverage|e2e|unitari", "S")),
     ("docs", (r"document|readme|comentari|jsdoc|docstring|changelog", "XS")),
@@ -46,11 +48,12 @@ UP = [  # señales que suben el peso
     r"producci[oó]n|intermitente|a veces|race|concurren|datos corrupt|p[eé]rdida de datos|rendimiento|performance",
     r"arquitectura|redise[nñ]|reescrib|rewrite|desde cero",
     r"a la versi[oó]n \d+|versi[oó]n mayor|major (version|upgrade)",
+    r"ambas plataformas|ios y android|android y ios|en las dos (apps|plataformas)",
 ]
 DOWN = r"peque[nñ]|solo|sólo|simple|r[aá]pid|un (bot[oó]n|campo|texto|color)|una (l[ií]nea|columna)|nada m[aá]s|typo|menor"
-LAYERS = {"frontend": r"front|ui\b|pantalla|vista|componente|p[aá]gina|bot[oó]n|formulario|css|estilo",
+LAYERS = {"frontend": r"front|ui\b|pantalla|vista|componente|p[aá]gina|bot[oó]n|formulario|css|estilo|screen|\bview\b|swiftui|compose|composable",
           "backend": r"\bback|\bapi\b|endpoint|servidor|servicio|controlador|\brutas?\b",
-          "datos": r"base de datos|\btablas?\b|migraci|esquema|\bmodelos?\b|\bquery\b|\bsql\b|prisma|\borm\b"}
+          "datos": r"base de datos|\btablas?\b|migraci|esquema|\bmodelos?\b|\bquery\b|\bsql\b|prisma|\borm\b|core data|swiftdata|\broom\b|realm|datastore|userdefaults"}
 FILE_RX = r"(?:#\S+|[\w./-]+\.(?:py|ts|tsx|js|jsx|vue|svelte|go|rs|java|kt|rb|php|cs|css|scss|html|sql|yaml|yml|json|md|png|jpe?g|webp))\b"
 STOP = {"para", "como", "cómo", "que", "qué", "con", "por", "una", "los", "las", "del", "este", "esta", "esto", "agrega",
         "agregar", "añade", "corrige", "arregla", "quiero", "necesito", "puedes", "favor", "hacer", "cuando", "donde",

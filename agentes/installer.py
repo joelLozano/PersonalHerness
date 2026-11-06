@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import shutil
 import sys
 import time
@@ -44,12 +45,72 @@ def local_team_path(root: Path) -> Path:
     return root / HARNESS_DIR / LOCAL_TEAM
 
 
-def load_team(root: Path | None = None) -> dict:
+PROFILES_DIR = PKG_DIR / "profiles"
+
+
+def available_profiles() -> list[str]:
+    return sorted(p.stem for p in PROFILES_DIR.glob("*.yaml")) if PROFILES_DIR.exists() else []
+
+
+def get_profiles(root: Path | None) -> list[str]:
+    if root is None:
+        return []
+    cfg = _load_json(Path(root) / HARNESS_DIR / "config.json")
+    return [p for p in cfg.get("profiles", []) if p in available_profiles()]
+
+
+def set_profiles(root: Path, profiles: list[str]) -> None:
+    p = root / HARNESS_DIR / "config.json"
+    p.parent.mkdir(exist_ok=True)
+    cfg = _load_json(p)
+    cfg["profiles"] = [x for x in profiles if x in available_profiles()]
+    p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
+
+
+def detect_profiles(root: Path) -> list[str]:
+    """Sugiere perfiles según el proyecto (p. ej. mobile si hay Xcode/SPM/Gradle de Android y no hay web)."""
+    root = Path(root)
+    mobile = any(root.glob("*.xcodeproj")) or any(root.glob("*.xcworkspace")) or any(root.glob("*/*.xcodeproj")) \
+        or (root / "Podfile").exists() or any((root / n).exists() for n in ("settings.gradle", "settings.gradle.kts")) \
+        or any(root.glob("*/src/main/AndroidManifest.xml")) if root.exists() else False
+    if (root / "Package.swift").exists() and "iOS" in (root / "Package.swift").read_text(errors="ignore"):
+        mobile = True
+    web = (root / "package.json").exists() and re.search(r'"(next|react-dom|vue|nuxt|svelte|@angular/core)"',
+                                                          (root / "package.json").read_text(errors="ignore"))
+    return ["mobile"] if mobile and not web else []
+
+
+def _append_extras(team: dict) -> dict:
+    """Las claves `<clave>_extra` de los perfiles se agregan al final del texto base (no lo reemplazan)."""
+    for key in ("orchestrator", "shared_protocol"):
+        if team.get(f"{key}_extra"):
+            team[key] = (team.get(key, "").rstrip() + "\n" + team.pop(f"{key}_extra").rstrip() + "\n")
+    k = team.get("kiro", {})
+    if k.get("orchestrator_extra"):
+        k["orchestrator"] = k.get("orchestrator", "").rstrip() + "\n" + k.pop("orchestrator_extra").rstrip() + "\n"
+    return team
+
+
+def load_team(root: Path | None = None, profiles: list[str] | None = None) -> dict:
     team = yaml.safe_load(BASE_TEAM.read_text(encoding="utf-8"))
+    extras: dict[str, list[str]] = {}
+    for prof in (profiles if profiles is not None else get_profiles(root)):
+        pdata = yaml.safe_load((PROFILES_DIR / f"{prof}.yaml").read_text(encoding="utf-8")) or {}
+        for key in ("orchestrator_extra", "shared_protocol_extra"):
+            if pdata.get(key):
+                extras.setdefault(key, []).append(pdata.pop(key))
+        if pdata.get("kiro", {}).get("orchestrator_extra"):
+            extras.setdefault("kiro_orchestrator_extra", []).append(pdata["kiro"].pop("orchestrator_extra"))
+        team = deep_merge(team, pdata)
     if root is not None and local_team_path(root).exists():
         local = yaml.safe_load(local_team_path(root).read_text(encoding="utf-8")) or {}
         team = deep_merge(team, local)
-    return team
+    for key in ("orchestrator_extra", "shared_protocol_extra"):
+        if extras.get(key):
+            team[key] = "\n".join(extras[key]) + ("\n" + team[key] if team.get(key) else "")
+    if extras.get("kiro_orchestrator_extra"):
+        team.setdefault("kiro", {})["orchestrator_extra"] = "\n".join(extras["kiro_orchestrator_extra"])
+    return _append_extras(team)
 
 
 def render_questions(sections: list[dict]) -> str:
@@ -115,15 +176,19 @@ def _load_json(p: Path) -> dict:
     return {}
 
 
+def _is_ours(command: str) -> bool:
+    return bool(re.search(r"(agentes|-m agentes) hook (session-start|prompt|stop)\b", command))
+
+
 def _merge_hooks(settings: dict, cmd: str) -> dict:
     hooks = settings.setdefault("hooks", {})
-    ours = {"SessionStart": f"{cmd} hook session-start", "UserPromptSubmit": f"{cmd} hook prompt"}
+    ours = {"SessionStart": f"{cmd} hook session-start", "UserPromptSubmit": f"{cmd} hook prompt",
+            "Stop": f"{cmd} hook stop"}
     for event, command in ours.items():
         groups = hooks.setdefault(event, [])
         # quita versiones previas nuestras
         for g in groups:
-            g["hooks"] = [h for h in g.get("hooks", []) if "hook session-start" not in h.get("command", "")
-                          and "hook prompt" not in h.get("command", "")]
+            g["hooks"] = [h for h in g.get("hooks", []) if not _is_ours(h.get("command", ""))]
         groups[:] = [g for g in groups if g.get("hooks")]
         groups.append({"hooks": [{"type": "command", "command": command, "timeout": 20}]})
     perms = settings.setdefault("permissions", {}).setdefault("allow", [])
@@ -137,8 +202,7 @@ def _remove_hooks(settings: dict) -> dict:
     for event in list(settings.get("hooks", {})):
         groups = settings["hooks"][event]
         for g in groups:
-            g["hooks"] = [h for h in g.get("hooks", []) if " hook session-start" not in h.get("command", "")
-                          and " hook prompt" not in h.get("command", "")]
+            g["hooks"] = [h for h in g.get("hooks", []) if not _is_ours(h.get("command", ""))]
         settings["hooks"][event] = [g for g in groups if g.get("hooks")]
         if not settings["hooks"][event]:
             del settings["hooks"][event]
