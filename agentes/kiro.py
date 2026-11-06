@@ -144,9 +144,45 @@ def _walk_agents(node) -> list[str]:
     return found
 
 
-def workflow_json(name: str, wf: dict) -> str:
-    recipe = {"name": name, **{k: v for k, v in wf.items() if k != "disabled"}}
-    return json.dumps(recipe, indent=2, ensure_ascii=False) + "\n"
+def _apply_economy(node, model: str):
+    """Quita la marca `economy` y, si hay modelo económico configurado, lo asigna a esos pasos."""
+    if isinstance(node, list):
+        return [_apply_economy(n, model) for n in node]
+    if not isinstance(node, dict):
+        return node
+    out = {}
+    for k, v in node.items():
+        if k == "economy":
+            continue
+        out[k] = _apply_economy(v, model) if k in ("steps", "branches") else v
+    if node.get("economy") and model and "modelId" not in node:
+        out["modelId"] = model
+    return out
+
+
+def workflow_json(name: str, wf: dict, economy_model: str = "") -> str:
+    body = {k: v for k, v in wf.items() if k != "disabled"}
+    body["steps"] = _apply_economy(body.get("steps", []), economy_model)
+    return json.dumps({"name": name, **body}, indent=2, ensure_ascii=False) + "\n"
+
+
+IGNORE_START, IGNORE_END = "# agentes:start (generado; edita kiro.kiroignore en team.local.yaml)", "# agentes:end"
+
+
+def update_kiroignore(root: Path, patterns: list[str] | None) -> None:
+    """Escribe/actualiza el bloque gestionado de .kiroignore sin tocar las líneas del usuario."""
+    p = root / ".kiroignore"
+    text = p.read_text(encoding="utf-8") if p.exists() else ""
+    if IGNORE_START in text and IGNORE_END in text:
+        pre, rest = text.split(IGNORE_START, 1)
+        post = rest.split(IGNORE_END, 1)[1]
+        text = pre.rstrip("\n") + ("\n" if pre.strip() else "") + post.lstrip("\n")
+    block = f"{IGNORE_START}\n" + "\n".join(patterns) + f"\n{IGNORE_END}\n" if patterns else ""
+    text = (text.rstrip("\n") + "\n\n" if text.strip() else "") + block
+    if text.strip():
+        p.write_text(text, encoding="utf-8")
+    elif p.exists():
+        p.unlink()
 
 
 def merge_mcp(root: Path, parts: list[str], remove: bool = False) -> None:
@@ -187,5 +223,6 @@ def generate(root: Path, team: dict, write: Callable[[str, str], None], cmd: str
             if missing:
                 warn(f"workflow {name} omitido: usa agentes no disponibles {missing}")
                 continue
-            write(f".kiro/workflows/{name}.workflow.json", workflow_json(name, wf))
+            write(f".kiro/workflows/{name}.workflow.json", workflow_json(name, wf, k.get("economy_model") or ""))
     merge_mcp(root, cmd.split())
+    update_kiroignore(root, list(k.get("kiroignore") or []))

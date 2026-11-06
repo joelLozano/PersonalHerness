@@ -260,9 +260,11 @@ class Store:
             kinds = [x.strip() for x in kinds.split(",") if x.strip()]
         pool = max(k * 3, 20)
         scores: dict[int, float] = {}
-        for ranking in (self._vec(query, kinds, pool), self._fts(query, kinds, pool)):
+        vec, fts = self._vec(query, kinds, pool), self._fts(query, kinds, pool)
+        for ranking in (vec, fts):
             for rank, mid in enumerate(ranking):
                 scores[mid] = scores.get(mid, 0.0) + 1.0 / (60 + rank)
+        vec_top = set(vec[: max(3, k)])
         best = sorted(scores, key=scores.get, reverse=True)[:k]
         if not best:
             return []
@@ -274,6 +276,8 @@ class Store:
             if mid in rows:
                 r = rows[mid]
                 r["score"] = round(scores[mid] * 1000, 2)
+                r["match"] = "both" if (mid in vec and mid in fts) else ("vec" if mid in vec else "fts")
+                r["vec_top"] = mid in vec_top
                 out.append(r)
         return out
 

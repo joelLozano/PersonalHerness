@@ -18,7 +18,8 @@ BASE_TEAM = PKG_DIR / "team.yaml"
 LOCAL_TEAM = "team.local.yaml"
 GEN_MARK = "<!-- Generado por `agentes sync`. No edites aquí: usa .agentes/team.local.yaml o `agentes agent ...` -->"
 BLOCK_START, BLOCK_END = "<!-- agentes:start -->", "<!-- agentes:end -->"
-GITIGNORE_LINES = [".agentes/agentes.db", ".agentes/vectors/", ".agentes/scan.json", ".agentes/*.log"]
+GITIGNORE_LINES = [".agentes/agentes.db", ".agentes/vectors/", ".agentes/scan.json", ".agentes/*.log",
+                   ".agentes/recall-state.json", ".agentes/backup/"]
 
 
 def cli_cmd() -> str:
@@ -241,6 +242,7 @@ def sync(root: Path, quiet: bool = False, ides: list[str] | None = None) -> dict
         kiro_gen.generate(root, team, write, cmd, GEN_MARK, lambda c: render_body(c, team), warn)
     elif "kiro" in cfg.get("ides", []):
         kiro_gen.merge_mcp(root, [], remove=True)
+        kiro_gen.update_kiroignore(root, None)
 
     for rel in old_manifest - set(new_manifest):  # elimina generados obsoletos
         p = root / rel
@@ -295,6 +297,7 @@ def uninstall(root: Path, purge: bool = False) -> list[str]:
     _unwire_claude(root)
     from . import kiro as kiro_gen
     kiro_gen.merge_mcp(root, [], remove=True)
+    kiro_gen.update_kiroignore(root, None)
     if purge:
         shutil.rmtree(root / HARNESS_DIR, ignore_errors=True)
         removed.append(HARNESS_DIR + "/")

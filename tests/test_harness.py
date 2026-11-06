@@ -86,7 +86,7 @@ def test_install_sync_uninstall(proj):
     (proj / ".claude" / "commands" / "mio.md").write_text("propio")
     (proj / ".claude" / "settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo hi"}]}]}}))
     res = sync(proj)
-    assert res["agents"] >= 9 and res["commands"] >= 14
+    assert res["agents"] >= 10 and res["commands"] >= 14
     sync(proj)  # idempotente
     st = json.loads((proj / ".claude" / "settings.json").read_text())
     assert len(st["hooks"]["SessionStart"]) == 1 and "Stop" in st["hooks"]
@@ -128,7 +128,7 @@ def test_kiro_generation(proj):
     from agentes.installer import set_ides
     set_ides(proj, ["kiro"])
     res = sync(proj)
-    assert res["ides"] == ["kiro"] and res["workflows"] == 4
+    assert res["ides"] == ["kiro"] and res["workflows"] == 5
     agent = (proj / ".kiro/agents/tech-lead.md").read_text()
     assert agent.startswith("---\nname: tech-lead") and "'@agentes'" in agent and "mcp__agentes__" not in agent
     steer = (proj / ".kiro/steering/feature.md").read_text()
@@ -166,3 +166,53 @@ def test_migrate_apply_restore(proj):
     for p, txt in original.items():
         assert (proj / p).read_text() == txt
     assert "Nunca uses var" not in Store(proj, use_vectors=False).context_summary()
+
+
+def test_token_savings(proj):
+    import os
+    from agentes.installer import set_ides
+    (proj / ".kiroignore").write_text("secretos/\n")
+    (proj / ".agentes").mkdir(exist_ok=True)
+    (proj / ".agentes/team.local.yaml").write_text("kiro:\n  economy_model: modelo-barato\n")
+    set_ides(proj, ["kiro"])
+    sync(proj)
+    ki = (proj / ".kiroignore").read_text()
+    assert ki.startswith("secretos/") and "node_modules/" in ki and "!.env.example" in ki  # respeta líneas del usuario
+    sync(proj)
+    assert (proj / ".kiroignore").read_text().count("agentes:start") == 1
+    wf = json.loads((proj / ".kiro/workflows/agentes-feature.workflow.json").read_text())
+    txt = json.dumps(wf)
+    assert '"economy"' not in txt and '"modelId": "modelo-barato"' in txt and '"effortLevel": "high"' in txt
+    lite = json.loads((proj / ".kiro/workflows/agentes-feature-lite.workflow.json").read_text())
+    assert [n.get("agent") for n in lite["steps"]][0] == "tech-lead"
+    assert "write" in (proj / ".kiro/agents/tech-lead.md").read_text()  # escribe las specs
+    uninstall(proj)
+    assert (proj / ".kiroignore").read_text().strip() == "secretos/"
+
+    # auto-recall selectivo y sin repetir en la sesión
+    s = Store(proj, use_vectors=False)
+    s.add("Los montos del checkout se guardan en centavos", "convention")
+    s.add("El login usa magic links", "decision")
+    sync(proj)
+
+    def hook(prompt, sid="s1"):
+        p = subprocess.run([sys.executable, "-m", "agentes", "hook", "prompt"], cwd=proj, capture_output=True, text=True,
+                           input=json.dumps({"prompt": prompt, "session_id": sid, "cwd": str(proj)}),
+                           env={**os.environ, "AGENTES_NO_VECTORS": "1"})
+        return p.stdout
+    assert hook("sí, continúa con eso por favor") == ""
+    first = hook("agrega descuentos al checkout con montos en centavos")
+    assert "centavos" in first and "magic" not in first
+    assert hook("valida los montos del checkout en centavos") == ""      # ya inyectada en s1
+    assert "centavos" in hook("agrega descuentos al checkout con montos en centavos", sid="s2")
+
+
+def test_memory_search_compact(proj):
+    import agentes.mcp_server as m
+    s = Store(proj, use_vectors=False)
+    body = "\n".join(f"const total{i} = computeTotal(order);" for i in range(80))
+    s.add_many([{"text": f"// src/f{i}.ts:1\n{body}", "kind": "code", "source": f"src/f{i}.ts:1"} for i in range(10)])
+    m._store = s
+    out = m._search("computeTotal order", "code")
+    assert out.count("[code]") == 5 and len(out) < 3500 and "src/f" in out
+    assert len(m._search("computeTotal order", "code", full=True)) > len(out)

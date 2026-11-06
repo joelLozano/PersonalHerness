@@ -29,7 +29,7 @@ def _s(desc: str, **props) -> dict:
     return {"description": desc, "inputSchema": {"type": "object", "properties": props, "required": required}}
 
 
-KIND_DESC = "Tipo de memoria: " + ", ".join(KINDS)
+KIND_DESC = "Tipo de memoria"
 
 TOOLS: dict[str, tuple[dict, Callable[..., Any]]] = {}
 
@@ -41,34 +41,40 @@ def tool(name: str, spec: dict):
     return deco
 
 
-@tool("project_context", _s("Resumen compacto del proyecto: perfil, decisiones, convenciones, diseño y tareas abiertas. Llámalo al empezar cualquier trabajo."))
+@tool("project_context", _s("Resumen del proyecto (reglas, perfil, decisiones, diseño, tareas). Llamar al empezar."))
 def _ctx():
     return store().context_summary(8000)
 
 
 @tool("memory_search", _s(
-    "Búsqueda híbrida (semántica + palabras clave) en la memoria del proyecto y el código indexado.",
+    "Busca en memoria y código indexado. Devuelve fragmentos cortos con archivo:línea; lee solo esas líneas si necesitas más.",
     query={"type": "string", "required": True},
-    kinds={"type": "string", "description": "Filtrar por tipos separados por coma (ej. 'decision,convention'). Usa 'code' para buscar código."},
-    k={"type": "integer", "description": "Número de resultados (default 8)"},
+    kinds={"type": "string", "description": "Tipos separados por coma; 'code' o 'spec' para código/specs"},
+    k={"type": "integer", "description": "Resultados (default 5)"},
+    full={"type": "boolean", "description": "Texto completo (más tokens)"},
 ))
-def _search(query: str, kinds: str | None = None, k: int = 8):
-    res = store().search(query, kinds, int(k or 8))
+def _search(query: str, kinds: str | None = None, k: int = 5, full: bool = False):
+    res = store().search(query, kinds, min(int(k or 5), 15))
     if not res:
         return "Sin resultados."
-    return "\n\n".join(
-        f"#{r['id']} [{r['kind']}] {('(' + r['source'] + ') ') if r['source'] else ''}score={r['score']}\n{r['text'][:1500]}"
-        for r in res)
+    limit = 2000 if full else 500
+    out = []
+    for r in res:
+        text = r["text"].strip()
+        if r["kind"] in ("code", "spec") and text.startswith("// "):
+            text = text.split("\n", 1)[1] if "\n" in text else ""  # la ruta ya va en el encabezado
+        cut = text[:limit] + (" …" if len(text) > limit else "")
+        out.append(f"#{r['id']} [{r['kind']}]{' ' + r['source'] if r['source'] else ''}\n{cut}")
+    return "\n\n".join(out)
 
 
 @tool("memory_add", _s(
-    "Guarda conocimiento durable del proyecto (decisiones, convenciones, aprendizajes, bugs, diseño...). "
-    "Escribe en 1-3 frases autocontenidas. No guardes cosas triviales ni temporales.",
+    "Guarda conocimiento durable (1-3 frases autocontenidas). Nada trivial ni temporal.",
     text={"type": "string", "required": True},
-    kind={"type": "string", "enum": list(KINDS), "description": KIND_DESC, "required": True},
-    tags={"type": "string", "description": "Etiquetas separadas por coma"},
-    source={"type": "string", "description": "Archivo, PR o feature relacionada"},
-    agent={"type": "string", "description": "Agente que lo registra"},
+    kind={"type": "string", "enum": [k for k in KINDS if k not in ("code", "spec", "scan")], "required": True},
+    tags={"type": "string"},
+    source={"type": "string", "description": "Archivo o feature"},
+    agent={"type": "string"},
 ))
 def _add(text: str, kind: str = "note", tags: str = "", source: str = "", agent: str = ""):
     if kind not in KINDS:
@@ -77,30 +83,27 @@ def _add(text: str, kind: str = "note", tags: str = "", source: str = "", agent:
     return f"Guardado #{mid} [{kind}]"
 
 
-@tool("memory_list", _s("Lista memorias recientes de un tipo.",
-                        kind={"type": "string", "description": KIND_DESC},
-                        limit={"type": "integer"}))
+@tool("memory_list", _s("Lista memorias recientes.", kind={"type": "string"}, limit={"type": "integer"}))
 def _list(kind: str | None = None, limit: int = 30):
     rows = store().list(kind, int(limit or 30))
     return "\n".join(f"#{r['id']} [{r['kind']}] {r['text'][:300]}" for r in rows) or "Vacío."
 
 
-@tool("memory_delete", _s("Elimina memorias obsoletas o incorrectas por id.",
+@tool("memory_delete", _s("Elimina memorias obsoletas por id.",
                           ids={"type": "array", "items": {"type": "integer"}, "required": True}))
 def _delete(ids: list[int]):
     return f"Eliminadas {store().delete([int(i) for i in ids])} memorias."
 
 
-@tool("profile_get", _s("Obtiene el perfil del proyecto (respuestas del kickoff/onboarding).",
-                        key={"type": "string", "description": "Clave concreta (opcional)"}))
+@tool("profile_get", _s("Perfil del proyecto (kickoff/onboarding).", key={"type": "string"}))
 def _pget(key: str | None = None):
     prof = store().profile_get(key)
     return dumps(prof) if prof else "Perfil vacío. Ejecuta /kickoff o /onboard."
 
 
 @tool("profile_set", _s(
-    "Guarda una o varias respuestas del perfil del proyecto.",
-    entries={"type": "array", "required": True, "description": "Lista de {key, value, section}",
+    "Guarda respuestas del perfil.",
+    entries={"type": "array", "required": True,
              "items": {"type": "object", "properties": {
                  "key": {"type": "string"}, "value": {"type": "string"}, "section": {"type": "string"}},
                  "required": ["key", "value"]}},
@@ -112,12 +115,12 @@ def _pset(entries: list[dict]):
 
 
 @tool("task_create", _s(
-    "Crea una tarea en el tablero del proyecto.",
+    "Crea una tarea en el tablero.",
     title={"type": "string", "required": True},
-    description={"type": "string", "description": "Detalle + criterios de aceptación"},
-    assignee={"type": "string", "description": "Agente responsable (ej. backend-dev)"},
+    description={"type": "string"},
+    assignee={"type": "string", "description": "Agente responsable"},
     priority={"type": "string", "enum": ["alta", "media", "baja"]},
-    feature={"type": "string", "description": "Feature/epic a la que pertenece"},
+    feature={"type": "string"},
     parent_id={"type": "integer"},
 ))
 def _tcreate(title: str, description: str = "", assignee: str = "", priority: str = "media",
@@ -125,7 +128,7 @@ def _tcreate(title: str, description: str = "", assignee: str = "", priority: st
     return f"Tarea #{store().task_create(title, description, assignee, priority, parent_id, feature)} creada."
 
 
-@tool("task_list", _s("Lista tareas (por defecto las no terminadas).",
+@tool("task_list", _s("Lista tareas (por defecto, abiertas).",
                       status={"type": "string", "enum": list(TASK_STATUSES)},
                       feature={"type": "string"},
                       include_done={"type": "boolean"}))
@@ -137,12 +140,12 @@ def _tlist(status: str | None = None, feature: str | None = None, include_done: 
 
 
 @tool("task_update", _s(
-    "Actualiza una tarea (estado, responsable, notas de avance).",
+    "Actualiza una tarea.",
     id={"type": "integer", "required": True},
     status={"type": "string", "enum": list(TASK_STATUSES)},
     assignee={"type": "string"},
     priority={"type": "string"},
-    notes={"type": "string", "description": "Se agrega al historial de la tarea"},
+    notes={"type": "string", "description": "Nota de avance"},
     title={"type": "string"},
     description={"type": "string"},
 ))

@@ -1,12 +1,12 @@
 # agentes: un equipo de desarrollo para Claude Code y Kiro
 
-`agentes` instala en cualquier proyecto (para Claude Code, Kiro o ambos) un equipo de 9 agentes con 14 flujos de trabajo (comandos slash), una memoria persistente con búsqueda vectorial y un tablero de tareas. Todo se define en un solo archivo (`agentes/team.yaml`). La memoria se guarda en una base de datos dentro del proyecto, no en archivos `.md`.
+`agentes` instala en cualquier proyecto (para Claude Code, Kiro o ambos) un equipo de 10 agentes con 14 flujos de trabajo (comandos slash), una memoria persistente con búsqueda vectorial y un tablero de tareas. Todo se define en un solo archivo (`agentes/team.yaml`). La memoria se guarda en una base de datos dentro del proyecto, no en archivos `.md`.
 
 ```
 Tú ─► Claude Code (orquestador)
         ├─ /kickoff · /onboard · /feature · /fix · /review · /test · /security …
         ├─ Subagentes: tech-lead · product-analyst · ux-designer · backend-dev · frontend-dev
-        │              code-reviewer · qa-engineer · security-engineer · devops-engineer
+        │              fullstack-dev · code-reviewer · qa-engineer · security-engineer · devops-engineer
         └─ MCP "agentes" ─► .agentes/agentes.db (SQLite + FTS5/BM25) + .agentes/vectors (ChromaDB)
                              memorias · perfil del proyecto · tareas · código indexado
 Hooks: SessionStart inyecta el contexto del proyecto · UserPromptSubmit recupera memorias relevantes (auto-recall)
@@ -78,17 +78,19 @@ agentes ide add kiro            # agregar Kiro a un proyecto que ya tiene el har
 
 | Equipo agentes | En Kiro se genera como |
 |---|---|
-| 9 agentes | `.kiro/agents/<nombre>.md`: custom agents que Kiro usa como sub-agentes y como agentes de los pasos de Workflows |
+| 10 agentes | `.kiro/agents/<nombre>.md`: custom agents que Kiro usa como sub-agentes y como agentes de los pasos de Workflows |
 | 14 comandos | `.kiro/steering/<nombre>.md` con `inclusion: manual`: se ejecutan escribiendo `/kickoff`, `/feature`… en el chat |
 | Instrucciones del orquestador | `.kiro/steering/agentes-equipo.md` con `inclusion: always` |
 | Hooks de contexto | `.kiro/hooks/agentes.json` (formato v1): `SessionStart`, `UserPromptSubmit` y `PostTaskExec` (re-indexa las specs) |
 | Memoria / tareas (MCP) | servidor `agentes` en `.kiro/settings/mcp.json` (se fusiona con tus servidores) |
-| Flujos con revisión | Recetas en `.kiro/workflows/`: `agentes-feature`, `agentes-bugfix`, `agentes-security-audit` y `agentes-onboard` |
+| Flujos con revisión | Recetas en `.kiro/workflows/`: `agentes-feature-lite` (5 sesiones como máximo), `agentes-feature` (14), `agentes-bugfix` (5), `agentes-security-audit` y `agentes-onboard` |
+| Archivos que Kiro no debe leer | Bloque gestionado en `.kiroignore`: dependencias, builds, archivos lock, `.env`. Solo lo aplica el IDE |
 
 **¿Workflows o solo agentes? Recomendación: combinarlos, sin desactivar los Workflows.**
 - **Tareas pequeñas y preguntas:** chat y sub-agentes. Son rápidos y baratos.
 - **Planear una feature:** usa Kiro Specs (`requirements.md` / `design.md` / `tasks.md`). Tienen la interfaz de Kiro para ejecutar tareas, y el equipo las redacta con la memoria del proyecto. Las specs se indexan solas en la base de datos.
-- **Entregar features grandes, corregir bugs delicados y auditar:** usa las recetas de Workflows. Aportan lo que los sub-agentes no tienen: ciclos de revisión (implementar → revisar, QA y seguridad en paralelo → corregir, hasta 3 veces), una pausa para tu aprobación del plan, y ejecución en segundo plano.
+- **Features medianas:** usa `agentes-feature-lite`: plan breve con tu aprobación → implementación full-stack → revisión + QA, con 2 ciclos como máximo.
+- **Features grandes o de riesgo, bugs delicados y auditorías:** usa `agentes-feature`, `agentes-bugfix` y `agentes-security-audit`. Aportan lo que los sub-agentes no tienen: ciclos de revisión (implementar → revisar, QA y seguridad en paralelo → corregir, hasta 2 veces), una pausa para tu aprobación del plan, y ejecución en segundo plano.
 - Deja *Workflow use* en **"Only when asked"**, que es el valor por defecto de Kiro: un workflow solo corre cuando lo pides (`/feature` o "ejecuta agentes-feature"). Evita "As much as possible", porque los workflows consumen bastantes más créditos que una sesión normal.
 - **Por qué no conviene usar solo sub-agentes:** en Kiro los sub-agentes no ven las Specs y los hooks no se disparan dentro de ellos. El equipo compensa esto con el MCP de memoria, que sí funciona en sub-agentes y en los pasos de los workflows.
 - Si no usas Workflows, añade a `.agentes/team.local.yaml`:
@@ -124,6 +126,42 @@ agentes migrate --restore [FECHA]        # deshace la migración (la última por
 - Todo se respalda en `.agentes/backup/<fecha>/` antes de cambiar nada.
 - La migración se puede deshacer por completo con `--restore`.
 - Avisa si algún archivo tiene cambios sin commit.
+
+### Ahorro de tokens
+Lo que más consume es la cantidad de sesiones de agente y el código que lee cada una. El harness lo limita así:
+- **`/feature` dimensiona primero la tarea:**
+  - Pequeña: un solo agente más QA.
+  - Mediana: plan breve, `fullstack-dev` y QA.
+  - Grande: el flujo completo.
+- **Recetas más cortas:**
+  - La ligera abre 5 sesiones como máximo. La completa abre 14, antes eran 22.
+  - Las ramas sin tareas terminan sin explorar el proyecto.
+  - La aprobación del plan se hace dentro del paso de diseño, sin abrir otra sesión.
+- **Esfuerzo por paso** (`effortLevel`): alto en diseño y revisión, bajo en los pasos mecánicos.
+- **Traspasos cortos:** cada paso responde en 150 palabras o menos y deja los detalles en archivos.
+- **Búsquedas compactas:** `memory_search` devuelve 5 fragmentos cortos con `archivo:línea` (antes llegaba a ~3,000 tokens; ahora ~660). Para obtener el texto completo, usa `full: true`.
+- **Auto-recall selectivo:**
+  - Ignora respuestas cortas ("sí", "continúa") y los comandos.
+  - Exige relevancia real con el mensaje.
+  - Nunca repite una memoria en la misma sesión.
+  - No repite las reglas, porque ya llegan al inicio de la sesión.
+- **Prompts y herramientas MCP compactos:** se recortaron entre 20% y 40%.
+
+Ajustes en `.agentes/team.local.yaml`:
+```yaml
+kiro:
+  economy_model: claude-haiku-4.5   # modelo para los pasos mecánicos (usa un id disponible en tu cuenta de Kiro)
+  kiroignore: [node_modules/, dist/, "*.lock", .env, generated/]   # reemplaza la lista por defecto
+settings:
+  auto_recall: true        # false lo desactiva
+  auto_recall_k: 3         # memorias por mensaje
+```
+Hábitos que también ayudan:
+- Usa Quick Spec en lugar de la Spec completa cuando la feature ya está clara.
+- Abre una sesión nueva por tarea.
+- Menciona archivos concretos (`#archivo`).
+- Desactiva los servidores MCP que no uses.
+- Ejecuta `/retro` para mantener la memoria corta.
 
 ## 5. Memoria y contexto
 

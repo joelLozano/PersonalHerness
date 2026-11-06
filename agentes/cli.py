@@ -432,17 +432,7 @@ def cmd_hook(a):
             s = Store(root, use_vectors=False)
             print("# Contexto del proyecto (memoria del equipo `agentes`)\n" + s.context_summary())
         elif a.event == "prompt":
-            settings = load_team(root).get("settings", {})
-            prompt = (data.get("prompt") or data.get("user_prompt") or os.environ.get("USER_PROMPT") or "").strip()
-            if not settings.get("auto_recall", True) or len(prompt) < settings.get("auto_recall_min_chars", 20):
-                return
-            s = Store(root)
-            hits = [h for h in s.search(prompt, ["decision", "convention", "design", "requirement", "bug",
-                                                 "security", "learning", "profile", "note"],
-                                        settings.get("auto_recall_k", 4))]
-            if hits:
-                print("Memorias relevantes del proyecto (auto-recall):\n" +
-                      "\n".join(f"- [{h['kind']}#{h['id']}] {h['text'][:350]}" for h in hits))
+            _recall(root, data)
     except Exception as e:  # pragma: no cover
         print(f"(agentes hook: {e})", file=sys.stderr)
 
@@ -455,6 +445,57 @@ def cmd_requisitos(a):
     if "--proyecto" not in extra and "-p" not in extra:
         extra = ["--proyecto", str(root)] + extra
     sys.exit(subprocess.call(["bash", str(script), *extra]))
+
+
+ACKS = {"si", "sí", "no", "ok", "okay", "dale", "va", "vale", "continua", "continúa", "sigue", "gracias", "listo",
+        "perfecto", "adelante", "hazlo", "procede", "yes", "go", "next", "thanks", "claro", "correcto", "bien"}
+STOP = {"para", "como", "cómo", "que", "qué", "con", "por", "una", "uno", "los", "las", "del", "el", "la", "de", "en",
+        "y", "a", "un", "es", "se", "lo", "al", "más", "mas", "este", "esta", "esto", "ese", "esa", "hay", "puedes",
+        "quiero", "necesito", "the", "and", "for", "with", "this", "that", "from", "what", "how", "can", "you"}
+
+
+def _recall(root: Path, data: dict) -> None:
+    """Auto-recall selectivo: solo memorias realmente relevantes y nunca repetidas en la misma sesión."""
+    import re as _re
+    settings = load_team(root).get("settings", {})
+    prompt = (data.get("prompt") or data.get("user_prompt") or os.environ.get("USER_PROMPT") or "").strip()
+    if not settings.get("auto_recall", True) or prompt.startswith("/"):
+        return
+    words = _re.findall(r"\w+", prompt.lower())
+    if len(prompt) < settings.get("auto_recall_min_chars", 20) or all(w in ACKS or w in STOP for w in words):
+        return
+    terms = {w for w in words if len(w) > 3 and w not in STOP}
+    k = int(settings.get("auto_recall_k", 3))
+    need = int(settings.get("auto_recall_min_overlap", 2))
+    s = Store(root)
+    hits = s.search(prompt, ["rule", "decision", "convention", "design", "requirement", "bug", "security",
+                             "learning", "profile", "note"], k * 3)
+
+    def relevant(h) -> bool:
+        overlap = len(terms & set(_re.findall(r"\w+", h["text"].lower())))
+        return h["match"] == "both" or overlap >= need or (h["match"] == "vec" and h["vec_top"] and overlap >= 1)
+
+    state_p = s.dir / "recall-state.json"
+    try:
+        state = json.loads(state_p.read_text()) if state_p.exists() else {}
+    except Exception:
+        state = {}
+    sid = str(data.get("session_id") or "")
+    seen = set(state.get(sid, [])) if sid else set()
+    picked = [h for h in hits if relevant(h) and h["id"] not in seen and h["kind"] != "rule"][:k]
+    if not picked:
+        return
+    print("Memorias relevantes (auto-recall):\n" + "\n".join(f"- [{h['kind']}#{h['id']}] {h['text'][:300]}" for h in picked))
+    if sid:
+        state[sid] = sorted(seen | {h["id"] for h in picked})
+        order = [x for x in state.get("_order", []) if x != sid] + [sid]
+        for old in order[:-20]:
+            state.pop(old, None)
+        state["_order"] = order[-20:]
+        try:
+            state_p.write_text(json.dumps(state))
+        except OSError:
+            pass
 
 
 def cmd_mcp(a):
