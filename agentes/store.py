@@ -20,6 +20,7 @@ from typing import Any
 HARNESS_DIR = ".agentes"
 
 KINDS = {
+    "rule": "Reglas obligatorias del proyecto (se inyectan siempre en el contexto)",
     "profile": "Respuestas del kickoff / contexto del proyecto",
     "decision": "Decisiones técnicas o de producto (ADR ligero)",
     "convention": "Convenciones de código, estilo, nombres, estructura",
@@ -30,6 +31,7 @@ KINDS = {
     "learning": "Aprendizajes / gotchas del proyecto",
     "scan": "Resultados del análisis automático del proyecto",
     "code": "Fragmentos de código indexados",
+    "spec": "Specs de Kiro indexadas (.kiro/specs: requirements/design/tasks)",
     "note": "Notas generales",
 }
 
@@ -279,7 +281,7 @@ class Store:
         if kind:
             cur = self.db.execute("SELECT * FROM memories WHERE kind=? ORDER BY id DESC LIMIT ?", (kind, limit))
         else:
-            cur = self.db.execute("SELECT * FROM memories WHERE kind!='code' ORDER BY id DESC LIMIT ?", (limit,))
+            cur = self.db.execute("SELECT * FROM memories WHERE kind NOT IN ('code','spec') ORDER BY id DESC LIMIT ?", (limit,))
         return [dict(r) for r in cur]
 
     def stats(self) -> dict:
@@ -357,9 +359,20 @@ class Store:
         return [dict(r) for r in self.db.execute(sql, args)]
 
     # ------------------------------------------------------------------ contexto
-    def context_summary(self, max_chars: int = 3500) -> str:
+    def context_summary(self, max_chars: int = 6000) -> str:
         """Resumen compacto que se inyecta al iniciar cada sesión."""
         parts = []
+        rules = list(reversed(self.list("rule", 60)))
+        if rules:
+            budget, lines = 2500, []
+            for r in rules:
+                t = r["text"].strip().replace("\n", " ")[:400]
+                if budget - len(t) < 0:
+                    lines.append("- (más reglas: usa memory_search con kinds='rule')")
+                    break
+                budget -= len(t)
+                lines.append(f"- {t}")
+            parts.append("## Reglas obligatorias\n" + "\n".join(lines))
         prof = self.profile_get()
         if prof:
             lines = []
@@ -384,7 +397,7 @@ class Store:
     def export(self) -> dict:
         return {
             "memories": [dict(r) for r in self.db.execute(
-                "SELECT kind,text,tags,source,agent,created_at FROM memories WHERE kind!='code'")],
+                "SELECT kind,text,tags,source,agent,created_at FROM memories WHERE kind NOT IN ('code','spec')")],
             "profile": [dict(r) for r in self.db.execute("SELECT key,value,section FROM profile")],
             "tasks": [dict(r) for r in self.db.execute("SELECT * FROM tasks")],
         }

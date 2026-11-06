@@ -89,14 +89,17 @@ def render_agent(name: str, a: dict, team: dict) -> str:
     return fm + "\n\n" + "\n".join(body).strip() + "\n"
 
 
-def render_command(name: str, c: dict, team: dict) -> str:
-    fm = _frontmatter({"description": c.get("description", ""), "argument-hint": c.get("argument-hint"),
-                       "allowed-tools": c.get("allowed-tools"), "model": c.get("model")})
+def render_body(c: dict, team: dict) -> str:
     body = c.get("body", "")
     q = team.get("questions", {})
     body = body.replace("{{questions_new}}", render_questions(q.get("new", [])))
-    body = body.replace("{{questions_existing}}", render_questions(q.get("existing", [])))
-    return fm + "\n" + GEN_MARK + "\n\n" + body.strip() + "\n"
+    return body.replace("{{questions_existing}}", render_questions(q.get("existing", [])))
+
+
+def render_command(name: str, c: dict, team: dict) -> str:
+    fm = _frontmatter({"description": c.get("description", ""), "argument-hint": c.get("argument-hint"),
+                       "allowed-tools": c.get("allowed-tools"), "model": c.get("model")})
+    return fm + "\n" + GEN_MARK + "\n\n" + render_body(c, team).strip() + "\n"
 
 
 def _load_json(p: Path) -> dict:
@@ -161,33 +164,83 @@ def _update_block(path: Path, content: str | None) -> None:
         path.write_text("", encoding="utf-8")
 
 
-def sync(root: Path, quiet: bool = False) -> dict:
-    """(Re)genera agentes, comandos, hooks, MCP y bloque de CLAUDE.md. Idempotente."""
+IDES = ("claude", "kiro")
+
+
+def detect_ides(root: Path) -> list[str]:
+    """IDEs a generar si el proyecto no tiene preferencia guardada."""
+    found = []
+    if (root / ".claude").exists() or (root / "CLAUDE.md").exists() or shutil.which("claude"):
+        found.append("claude")
+    if (root / ".kiro").exists() or shutil.which("kiro") or shutil.which("kiro-cli"):
+        found.append("kiro")
+    return found or ["claude"]
+
+
+def get_ides(root: Path) -> list[str]:
+    cfg = _load_json(root / HARNESS_DIR / "config.json")
+    return cfg.get("ides") or detect_ides(root)
+
+
+def set_ides(root: Path, ides: list[str]) -> None:
+    p = root / HARNESS_DIR / "config.json"
+    p.parent.mkdir(exist_ok=True)
+    cfg = _load_json(p)
+    cfg["ides"] = [i for i in IDES if i in ides]
+    p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
+
+
+def sync(root: Path, quiet: bool = False, ides: list[str] | None = None) -> dict:
+    """(Re)genera agentes, comandos, hooks, MCP e instrucciones para cada IDE. Idempotente."""
+    from . import kiro as kiro_gen
+
     root = root.resolve()
     team = load_team(root)
     hd = root / HARNESS_DIR
     hd.mkdir(exist_ok=True)
     cfg_path = hd / "config.json"
     cfg = _load_json(cfg_path)
+    ides = [i for i in IDES if i in (ides or cfg.get("ides") or detect_ides(root))]
     old_manifest = set(cfg.get("generated", []))
     new_manifest: list[str] = []
+
+    def warn(msg: str):
+        if not quiet:
+            print(f"  ! {msg}")
 
     def write(rel: str, content: str):
         p = root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         if p.exists() and rel not in old_manifest and GEN_MARK not in p.read_text(encoding="utf-8", errors="ignore"):
-            if not quiet:
-                print(f"  ! {rel} ya existe y no es nuestro: lo omito (renómbralo o usa otro nombre en team.local.yaml)")
+            warn(f"{rel} ya existe y no es nuestro: lo omito (usa `agentes migrate` para sustituirlo)")
             return
         p.write_text(content, encoding="utf-8")
         new_manifest.append(rel)
 
-    for name, a in team.get("agents", {}).items():
-        if a and not a.get("disabled"):
-            write(f".claude/agents/{name}.md", render_agent(name, a, team))
-    for name, c in team.get("commands", {}).items():
-        if c and not c.get("disabled"):
-            write(f".claude/commands/{name}.md", render_command(name, c, team))
+    cmd = cli_cmd()
+    if "claude" in ides:
+        for name, a in team.get("agents", {}).items():
+            if a and not a.get("disabled"):
+                write(f".claude/agents/{name}.md", render_agent(name, a, team))
+        for name, c in team.get("commands", {}).items():
+            if c and not c.get("disabled"):
+                write(f".claude/commands/{name}.md", render_command(name, c, team))
+        settings_p = root / ".claude" / "settings.json"
+        settings_p.parent.mkdir(exist_ok=True)
+        settings_p.write_text(json.dumps(_merge_hooks(_load_json(settings_p), cmd), indent=2, ensure_ascii=False) + "\n")
+        mcp_p = root / ".mcp.json"
+        mcp = _load_json(mcp_p)
+        parts = cmd.split()
+        mcp.setdefault("mcpServers", {})["agentes"] = {"type": "stdio", "command": parts[0], "args": parts[1:] + ["mcp"]}
+        mcp_p.write_text(json.dumps(mcp, indent=2, ensure_ascii=False) + "\n")
+        _update_block(root / "CLAUDE.md", team.get("orchestrator", ""))
+    elif "claude" in cfg.get("ides", []):  # se desactivó Claude: limpiar sus integraciones
+        _unwire_claude(root)
+
+    if "kiro" in ides:
+        kiro_gen.generate(root, team, write, cmd, GEN_MARK, lambda c: render_body(c, team), warn)
+    elif "kiro" in cfg.get("ides", []):
+        kiro_gen.merge_mcp(root, [], remove=True)
 
     for rel in old_manifest - set(new_manifest):  # elimina generados obsoletos
         p = root / rel
@@ -196,19 +249,6 @@ def sync(root: Path, quiet: bool = False) -> dict:
                 p.unlink()
             except OSError:
                 pass
-
-    cmd = cli_cmd()
-    settings_p = root / ".claude" / "settings.json"
-    settings_p.parent.mkdir(exist_ok=True)
-    settings_p.write_text(json.dumps(_merge_hooks(_load_json(settings_p), cmd), indent=2, ensure_ascii=False) + "\n")
-
-    mcp_p = root / ".mcp.json"
-    mcp = _load_json(mcp_p)
-    parts = cmd.split()
-    mcp.setdefault("mcpServers", {})["agentes"] = {"type": "stdio", "command": parts[0], "args": parts[1:] + ["mcp"]}
-    mcp_p.write_text(json.dumps(mcp, indent=2, ensure_ascii=False) + "\n")
-
-    _update_block(root / "CLAUDE.md", team.get("orchestrator", ""))
 
     gi = root / ".gitignore"
     lines = gi.read_text().splitlines() if gi.exists() else []
@@ -220,11 +260,27 @@ def sync(root: Path, quiet: bool = False) -> dict:
         local_team_path(root).write_text(LOCAL_TEMPLATE, encoding="utf-8")
 
     cfg.update({"version": __version__, "synced_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "generated": sorted(new_manifest), "cli": cmd})
+                "generated": sorted(new_manifest), "cli": cmd, "ides": ides})
     cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
     Store(root)  # crea la BD
-    return {"agents": sum(1 for r in new_manifest if "/agents/" in r),
-            "commands": sum(1 for r in new_manifest if "/commands/" in r)}
+    return {"ides": ides,
+            "agents": len({Path(r).stem for r in new_manifest if "/agents/" in r}),
+            "commands": len({Path(r).stem for r in new_manifest
+                             if "/commands/" in r or (r.startswith(".kiro/steering/") and "agentes-equipo" not in r)}),
+            "workflows": sum(1 for r in new_manifest if r.endswith(".workflow.json"))}
+
+
+def _unwire_claude(root: Path) -> None:
+    sp = root / ".claude" / "settings.json"
+    if sp.exists():
+        sp.write_text(json.dumps(_remove_hooks(_load_json(sp)), indent=2, ensure_ascii=False) + "\n")
+    mp = root / ".mcp.json"
+    if mp.exists():
+        m = _load_json(mp)
+        m.get("mcpServers", {}).pop("agentes", None)
+        mp.write_text(json.dumps(m, indent=2) + "\n")
+    if (root / "CLAUDE.md").exists():
+        _update_block(root / "CLAUDE.md", None)
 
 
 def uninstall(root: Path, purge: bool = False) -> list[str]:
@@ -236,15 +292,9 @@ def uninstall(root: Path, purge: bool = False) -> list[str]:
         if p.exists():
             p.unlink()
             removed.append(rel)
-    sp = root / ".claude" / "settings.json"
-    if sp.exists():
-        sp.write_text(json.dumps(_remove_hooks(_load_json(sp)), indent=2, ensure_ascii=False) + "\n")
-    mp = root / ".mcp.json"
-    if mp.exists():
-        m = _load_json(mp)
-        m.get("mcpServers", {}).pop("agentes", None)
-        mp.write_text(json.dumps(m, indent=2) + "\n")
-    _update_block(root / "CLAUDE.md", None)
+    _unwire_claude(root)
+    from . import kiro as kiro_gen
+    kiro_gen.merge_mcp(root, [], remove=True)
     if purge:
         shutil.rmtree(root / HARNESS_DIR, ignore_errors=True)
         removed.append(HARNESS_DIR + "/")

@@ -76,6 +76,8 @@ def _tree(root: Path, files: list[Path], depth: int = 2) -> list[str]:
     counts: Counter = Counter()
     for f in files:
         parts = f.relative_to(root).parts
+        if parts[0] in (".kiro", ".claude", ".github", ".cursor", ".windsurf"):
+            continue
         for d in range(1, min(depth, len(parts) - 1) + 1):
             counts["/".join(parts[:d]) + "/"] += 1
     return [f"{k} ({v} archivos)" for k, v in sorted(counts.items())][:60]
@@ -276,11 +278,18 @@ def _chunks(text: str, size: int = 60, overlap: int = 10) -> list[tuple[int, str
     return out
 
 
+def _indexable(root: Path, f: Path) -> bool:
+    rel = f.relative_to(root).as_posix()
+    if rel.startswith(".kiro/"):
+        return rel.startswith(".kiro/specs/")  # de .kiro solo se indexan las specs
+    return True
+
+
 def index_code(store: Store, root: Path, max_file_kb: int = 150, progress=None) -> dict:
     files = [f for f in list_files(root)
-             if f.suffix.lower() in CODE_EXTS and f.stat().st_size <= max_file_kb * 1024
+             if _indexable(root, f) and f.suffix.lower() in CODE_EXTS and f.stat().st_size <= max_file_kb * 1024
              and not f.name.endswith((".lock", "-lock.json", ".min.js", ".map"))
-             and f.name not in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "CLAUDE.md", ".mcp.json")]
+             and f.name not in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "CLAUDE.md", ".mcp.json", "AGENTS.md")]
     known = {r["path"]: (r["hash"], r["chunk_ids"]) for r in store.db.execute("SELECT * FROM files")}
     seen, added, skipped, removed = set(), 0, 0, 0
     for n, f in enumerate(files):
@@ -295,7 +304,8 @@ def index_code(store: Store, root: Path, max_file_kb: int = 150, progress=None) 
             continue
         if rel in known:
             store.delete(json.loads(known[rel][1]))
-        items = [{"text": f"// {rel}:{start}\n{chunk}", "kind": "code", "source": f"{rel}:{start}",
+        kind = "spec" if rel.startswith(".kiro/specs/") else "code"
+        items = [{"text": f"// {rel}:{start}\n{chunk}", "kind": kind, "source": f"{rel}:{start}",
                   "tags": LANG_BY_EXT.get(f.suffix.lower(), f.suffix.lstrip("."))}
                  for start, chunk in _chunks(text)]
         ids = store.add_many(items)

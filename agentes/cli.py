@@ -12,8 +12,8 @@ from pathlib import Path
 import yaml
 
 from . import __version__
-from .installer import (BASE_TEAM, deep_merge, load_team, local_team_path, render_agent, render_questions,
-                        sync, uninstall)
+from .installer import (BASE_TEAM, IDES, deep_merge, get_ides, load_team, local_team_path, render_agent,
+                        render_questions, set_ides, sync, uninstall)
 from .store import HARNESS_DIR, KINDS, TASK_STATUSES, Store, dumps, find_root
 
 C = {"b": "\033[1m", "g": "\033[32m", "y": "\033[33m", "r": "\033[31m", "c": "\033[36m", "0": "\033[0m"}
@@ -38,8 +38,14 @@ def cmd_install(a):
     root = Path(a.path or ".").resolve()
     if not root.is_dir():
         sys.exit(f"No existe {root}")
-    res = sync(root)
-    ok(f"Harness instalado en {root}: {res['agents']} agentes, {res['commands']} comandos")
+    ides = None
+    if a.ide:
+        ides = list(IDES) if a.ide in ("ambos", "all") else [a.ide]
+        set_ides(root, ides)
+    res = sync(root, ides=ides)
+    ok(f"Harness instalado en {root} para {' + '.join(res['ides'])}: {res['agents']} agentes, "
+       f"{res['commands']} comandos" + (f", {res['workflows']} workflows de Kiro" if res['workflows'] else ""))
+    _offer_migration(root, a)
     store = Store(root)
     existing = any((root / m).exists() for m in ("package.json", "pyproject.toml", "go.mod", "Cargo.toml",
                                                  "requirements.txt", "pom.xml", "Gemfile", "composer.json", "src"))
@@ -54,9 +60,93 @@ def cmd_install(a):
             ok(f"Código indexado: {st['indexed']} archivos")
     print(f"Memoria vectorial: {store.vector_status()}")
     print(f"""
-{C['b']}Siguiente paso{C['0']} → abre Claude Code en el proyecto (`claude`) y ejecuta:
+{C['b']}Siguiente paso{C['0']} → abre {'Claude Code (`claude`)' if 'claude' in res['ides'] else 'Kiro'} en el proyecto y ejecuta:
   {C['c']}/{'onboard' if existing else 'kickoff'}{C['0']}  {'(proyecto existente: contexto + preguntas)' if existing else '(proyecto nuevo: cuestionario de contexto)'}
 Personaliza el equipo en .agentes/team.local.yaml y aplica con `agentes sync`.""")
+
+
+def _print_migration_report(root: Path, items) -> None:
+    from .migrate import keep_notes
+    print(f"\n{C['b']}Configuraciones de agentes / archivos .md detectados ({len(items)}){C['0']}")
+    for it in items:
+        print(f"  • {it.path:42} {C['c']}{it.tool:16}{C['0']} → {it.action}")
+    notes = keep_notes(root)
+    if notes:
+        print(f"{C['b']}Se conservan sin cambios{C['0']}")
+        for n in notes:
+            print(f"  · {n}")
+
+
+def _ask(question: str) -> bool:
+    if not sys.stdin.isatty():
+        return False
+    while True:
+        ans = input(f"{question} [s/n] ").strip().lower()
+        if ans in ("s", "si", "sí", "y", "yes"):
+            return True
+        if ans in ("n", "no"):
+            return False
+
+
+def _offer_migration(root: Path, a) -> None:
+    from .migrate import apply, detect
+    items = detect(root)
+    if not items:
+        return
+    _print_migration_report(root, items)
+    if getattr(a, "migrate", False) or _ask("\n¿Migrar a la base de datos y sustituir estas configuraciones por el equipo agentes? (se respaldan)"):
+        st = apply(root, items)
+        ok(f"Migración aplicada: {st}")
+        print(f"   Deshacer: agentes migrate --restore {Path(st['backup']).name}")
+    else:
+        print(f"   Puedes hacerlo después con: {C['c']}agentes migrate --apply{C['0']} (simulacro: agentes migrate)")
+
+
+def cmd_migrate(a):
+    from .migrate import apply, backups, detect, git_dirty, restore
+    root = root_of(a)
+    if not (root / HARNESS_DIR).exists():
+        sys.exit("Primero instala el harness: agentes install")
+    if a.backups:
+        print("\n".join(backups(root)) or "Sin respaldos.")
+        return
+    if a.restore is not None:
+        ok(f"Restaurado: {restore(root, a.restore or None)}")
+        return
+    items = detect(root, a.include)
+    if not items:
+        ok("No se encontraron configuraciones de agentes ni .md por migrar.")
+        return
+    _print_migration_report(root, items)
+    if not a.apply:
+        print(f"\n{C['y']}Simulacro: no se cambió nada.{C['0']} Aplica con: agentes migrate --apply"
+              f"{' --keep (importa sin eliminar originales)' if not a.keep else ''}")
+        return
+    dirty = git_dirty(root, [it.path for it in items])
+    if dirty:
+        warn("Estos archivos tienen cambios sin commit (igual se respaldan): " + ", ".join(dirty))
+    if not a.yes and not _ask("\n¿Aplicar la migración?"):
+        print("Cancelado." if sys.stdin.isatty() else "Sin terminal interactiva: usa --yes para confirmar.")
+        return
+    st = apply(root, items, keep=a.keep)
+    ok(f"Migración aplicada: {st}")
+    print(f"   Deshacer: agentes migrate --restore {Path(st['backup']).name}")
+
+
+def cmd_ide(a):
+    root = root_of(a)
+    current = get_ides(root)
+    if a.action == "list":
+        print(f"IDEs configurados: {', '.join(current)}   (disponibles: {', '.join(IDES)})")
+        return
+    if not a.name or a.name not in IDES:
+        sys.exit(f"Indica el IDE: {', '.join(IDES)}")
+    new = sorted(set(current) | {a.name}) if a.action == "add" else [i for i in current if i != a.name]
+    if not new:
+        sys.exit("Debe quedar al menos un IDE.")
+    res = sync(root, ides=new)
+    set_ides(root, res["ides"])
+    ok(f"IDEs: {', '.join(res['ides'])} (sincronizado)")
 
 
 def cmd_sync(a):
@@ -85,6 +175,17 @@ def cmd_doctor(a):
         (".mcp.json con servidor agentes", '"agentes"' in (root / ".mcp.json").read_text() if (root / ".mcp.json").exists() else False),
         ("hooks en .claude/settings.json", "hook session-start" in (root / ".claude/settings.json").read_text() if (root / ".claude/settings.json").exists() else False),
     ]
+    ides = get_ides(root)
+    print(f"  IDEs: {', '.join(ides)}")
+    if "kiro" in ides:
+        checks += [
+            ("Kiro: .kiro/agents generados", any((root / ".kiro/agents").glob("*.md")) if (root / ".kiro/agents").exists() else False),
+            ("Kiro: hooks .kiro/hooks/agentes.json", (root / ".kiro/hooks/agentes.json").exists()),
+            ("Kiro: MCP en .kiro/settings/mcp.json", '"agentes"' in (root / ".kiro/settings/mcp.json").read_text() if (root / ".kiro/settings/mcp.json").exists() else False),
+            ("Kiro: recetas en .kiro/workflows", any((root / ".kiro/workflows").glob("*.workflow.json")) if (root / ".kiro/workflows").exists() else False),
+        ]
+        if "claude" not in ides:
+            checks = [c for c in checks if not c[0].startswith((".mcp.json", "hooks en .claude", "claude (Claude"))]
     try:
         import chromadb  # noqa
         checks.append(("chromadb instalado (vectores)", True))
@@ -123,8 +224,9 @@ def cmd_index(a):
     if a.rebuild:
         s.db.execute("DELETE FROM files")
         s.delete([r[0] for r in s.db.execute("SELECT id FROM memories WHERE kind='code'")])
-    st = index_code(s, root, progress=lambda n, t: print(f"  {n}/{t}…", end="\r"))
-    ok(f"Indexado: {st}  ·  vectores: {s.vector_status()}")
+    st = index_code(s, root, progress=None if a.quiet else (lambda n, t: print(f"  {n}/{t}…", end="\r")))
+    if not a.quiet:
+        ok(f"Indexado: {st}  ·  vectores: {s.vector_status()}")
 
 
 def cmd_context(a):
@@ -331,7 +433,7 @@ def cmd_hook(a):
             print("# Contexto del proyecto (memoria del equipo `agentes`)\n" + s.context_summary())
         elif a.event == "prompt":
             settings = load_team(root).get("settings", {})
-            prompt = (data.get("prompt") or "").strip()
+            prompt = (data.get("prompt") or data.get("user_prompt") or os.environ.get("USER_PROMPT") or "").strip()
             if not settings.get("auto_recall", True) or len(prompt) < settings.get("auto_recall_min_chars", 20):
                 return
             s = Store(root)
@@ -362,7 +464,7 @@ def cmd_mcp(a):
 
 # ----------------------------------------------------------------------------- parser
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="agentes", description="Harness de equipo de desarrollo para Claude Code")
+    p = argparse.ArgumentParser(prog="agentes", description="Harness de equipo de desarrollo para Claude Code y Kiro")
     p.add_argument("--version", action="version", version=f"agentes {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -376,6 +478,19 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("target", nargs="?", help="Ruta (default: .)")
     x.add_argument("--no-scan", action="store_true")
     x.add_argument("--no-index", action="store_true")
+    x.add_argument("--ide", choices=[*IDES, "ambos", "all"], help="IDE(s) a generar (default: autodetección)")
+    x.add_argument("--migrate", action="store_true", help="Migrar configuraciones previas sin preguntar")
+    x = sp("migrate", cmd_migrate, "Migra .md y configuraciones de agentes existentes a la BD y al equipo")
+    x.add_argument("--apply", action="store_true", help="Aplicar (por defecto es un simulacro)")
+    x.add_argument("--keep", action="store_true", help="Importar sin eliminar los originales")
+    x.add_argument("--include", "-i", action="append", default=[], metavar="GLOB",
+                   help="Archivos .md extra a migrar (ej. 'docs/decisiones/*.md'); repetible")
+    x.add_argument("--yes", "-y", action="store_true", help="No pedir confirmación")
+    x.add_argument("--restore", nargs="?", const="", metavar="FECHA", help="Deshacer una migración (default: la última)")
+    x.add_argument("--backups", action="store_true", help="Listar respaldos de migración")
+    x = sp("ide", cmd_ide, "IDEs del proyecto: list | add <claude|kiro> | remove <claude|kiro>")
+    x.add_argument("action", choices=["list", "add", "remove"])
+    x.add_argument("name", nargs="?")
     sp("sync", cmd_sync, "Regenera agentes/comandos/hooks desde team.yaml + team.local.yaml")
     x = sp("uninstall", cmd_uninstall, "Quita el harness del proyecto")
     x.add_argument("--purge", action="store_true", help="Borra también la memoria (.agentes/)")
@@ -386,8 +501,9 @@ def build_parser() -> argparse.ArgumentParser:
     x = sp("scan", cmd_scan, "Analiza el proyecto (stack, scripts, git, deuda) y lo guarda en memoria")
     x.add_argument("--json", action="store_true")
     x.add_argument("--no-save", action="store_true")
-    x = sp("index", cmd_index, "Indexa el código en la memoria vectorial (incremental)")
+    x = sp("index", cmd_index, "Indexa el código y las specs de Kiro en la memoria vectorial (incremental)")
     x.add_argument("--rebuild", action="store_true")
+    x.add_argument("--quiet", "-q", action="store_true")
     x = sp("context", cmd_context, "Muestra el resumen de contexto que reciben los agentes")
     x.add_argument("--max", type=int, default=6000)
     x = sp("questions", cmd_questions, "Muestra el cuestionario")

@@ -1,6 +1,6 @@
-# agentes: un equipo de desarrollo para Claude Code
+# agentes: un equipo de desarrollo para Claude Code y Kiro
 
-`agentes` instala en cualquier proyecto un equipo de 9 agentes con 14 flujos de trabajo (comandos slash), una memoria persistente con búsqueda vectorial y un tablero de tareas. Todo se define en un solo archivo (`agentes/team.yaml`). La memoria se guarda en una base de datos dentro del proyecto, no en archivos `.md`.
+`agentes` instala en cualquier proyecto (para Claude Code, Kiro o ambos) un equipo de 9 agentes con 14 flujos de trabajo (comandos slash), una memoria persistente con búsqueda vectorial y un tablero de tareas. Todo se define en un solo archivo (`agentes/team.yaml`). La memoria se guarda en una base de datos dentro del proyecto, no en archivos `.md`.
 
 ```
 Tú ─► Claude Code (orquestador)
@@ -11,6 +11,8 @@ Tú ─► Claude Code (orquestador)
                              memorias · perfil del proyecto · tareas · código indexado
 Hooks: SessionStart inyecta el contexto del proyecto · UserPromptSubmit recupera memorias relevantes (auto-recall)
 ```
+
+El mismo `team.yaml` genera los archivos de cada IDE. Claude Code usa `.claude/` y `CLAUDE.md`; Kiro usa `.kiro/` (ver la sección 3). La memoria, el perfil y las tareas son los mismos para ambos.
 
 ## 1. Instalación (una vez por máquina)
 
@@ -67,15 +69,71 @@ Si prefieres responder en la terminal: `agentes kickoff`.
 | `/remember <x>` · `/recall <q>` | Guardar o buscar en la memoria |
 | `/retro` | Consolida la memoria y propone mejoras al harness para ese proyecto |
 
-## 3. Memoria y contexto
+## 3. Kiro: Specs, sub-agentes y Workflows
 
-- **Una base de datos por proyecto** (`.agentes/agentes.db`), con estos tipos de memoria: `decision`, `convention`, `design`, `requirement`, `bug`, `security`, `learning`, `profile`, `scan`, `code` y `note`.
+```bash
+agentes install --ide kiro      # o --ide ambos; sin --ide se detecta (.kiro/, .claude/, CLI instalados)
+agentes ide add kiro            # agregar Kiro a un proyecto que ya tiene el harness
+```
+
+| Equipo agentes | En Kiro se genera como |
+|---|---|
+| 9 agentes | `.kiro/agents/<nombre>.md`: custom agents que Kiro usa como sub-agentes y como agentes de los pasos de Workflows |
+| 14 comandos | `.kiro/steering/<nombre>.md` con `inclusion: manual`: se ejecutan escribiendo `/kickoff`, `/feature`… en el chat |
+| Instrucciones del orquestador | `.kiro/steering/agentes-equipo.md` con `inclusion: always` |
+| Hooks de contexto | `.kiro/hooks/agentes.json` (formato v1): `SessionStart`, `UserPromptSubmit` y `PostTaskExec` (re-indexa las specs) |
+| Memoria / tareas (MCP) | servidor `agentes` en `.kiro/settings/mcp.json` (se fusiona con tus servidores) |
+| Flujos con revisión | Recetas en `.kiro/workflows/`: `agentes-feature`, `agentes-bugfix`, `agentes-security-audit` y `agentes-onboard` |
+
+**¿Workflows o solo agentes? Recomendación: combinarlos, sin desactivar los Workflows.**
+- **Tareas pequeñas y preguntas:** chat y sub-agentes. Son rápidos y baratos.
+- **Planear una feature:** usa Kiro Specs (`requirements.md` / `design.md` / `tasks.md`). Tienen la interfaz de Kiro para ejecutar tareas, y el equipo las redacta con la memoria del proyecto. Las specs se indexan solas en la base de datos.
+- **Entregar features grandes, corregir bugs delicados y auditar:** usa las recetas de Workflows. Aportan lo que los sub-agentes no tienen: ciclos de revisión (implementar → revisar, QA y seguridad en paralelo → corregir, hasta 3 veces), una pausa para tu aprobación del plan, y ejecución en segundo plano.
+- Deja *Workflow use* en **"Only when asked"**, que es el valor por defecto de Kiro: un workflow solo corre cuando lo pides (`/feature` o "ejecuta agentes-feature"). Evita "As much as possible", porque los workflows consumen bastantes más créditos que una sesión normal.
+- **Por qué no conviene usar solo sub-agentes:** en Kiro los sub-agentes no ven las Specs y los hooks no se disparan dentro de ellos. El equipo compensa esto con el MCP de memoria, que sí funciona en sub-agentes y en los pasos de los workflows.
+- Si no usas Workflows, añade a `.agentes/team.local.yaml`:
+  ```yaml
+  kiro:
+    generate_workflows: false
+  ```
+  Los comandos (`/feature`, `/fix`…) detectan esto y trabajan solo con sub-agentes.
+- **Modelos:** por defecto los agentes heredan el modelo de la sesión de Kiro. Para fijar uno, usa `kiro_model: claude-sonnet-4.6` en el agente dentro de `team.local.yaml`.
+
+## 4. Migrar configuraciones y archivos .md existentes
+
+`agentes install` detecta si el proyecto ya tiene configuraciones de agentes y te ofrece sustituirlas por el equipo (s/n). También puedes hacerlo cuando quieras:
+
+```bash
+agentes migrate                          # simulacro: muestra qué se migraría (no cambia nada)
+agentes migrate --apply                  # respalda, importa a la BD, sustituye y regenera el equipo
+agentes migrate --apply --keep           # importa pero conserva los archivos originales
+agentes migrate --include "docs/decisiones/*.md" --apply   # tus propios .md
+agentes migrate --backups                # lista los respaldos
+agentes migrate --restore [FECHA]        # deshace la migración (la última por defecto)
+```
+
+| Detecta | Qué hace |
+|---|---|
+| `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`, `.cursor/rules`, `.windsurfrules`, `.clinerules`, `.github/copilot-instructions.md`, steering de Kiro con `always` | Trocea por secciones → **reglas** (siempre presentes en el contexto) o memorias clasificadas (decisión, diseño, seguridad…) |
+| Steering de Kiro `fileMatch`/`auto`, `memory-bank/`, `.memory/`, `.ai/`, los `--include` | Memorias clasificadas automáticamente |
+| `.claude/agents/*.md`, `.kiro/agents/*.md`/`*.json` | Agentes del equipo en `team.local.yaml`; si el nombre coincide con uno del equipo, sus instrucciones se suman a él |
+| `.claude/commands/**/*.md`, steering de Kiro `manual` | Comandos del equipo (si el nombre ya existe, se agrega como `<nombre>-migrado`) |
+
+**Garantías para no afectar el proyecto:**
+- Nunca toca código, `README`, documentación, specs de Kiro, tus hooks ni tus servidores MCP.
+- Todo se respalda en `.agentes/backup/<fecha>/` antes de cambiar nada.
+- La migración se puede deshacer por completo con `--restore`.
+- Avisa si algún archivo tiene cambios sin commit.
+
+## 5. Memoria y contexto
+
+- **Una base de datos por proyecto** (`.agentes/agentes.db`), con estos tipos de memoria: `rule` (reglas siempre presentes), `decision`, `convention`, `design`, `requirement`, `bug`, `security`, `learning`, `profile`, `scan`, `code`, `spec` (specs de Kiro) y `note`.
 - **Búsqueda híbrida**: combina vectores (ChromaDB) con BM25 (SQLite FTS5) mediante Reciprocal Rank Fusion. Encuentra tanto por significado como por nombres exactos de funciones o variables. Si ChromaDB no está disponible, sigue funcionando solo con BM25.
 - **Contexto automático**: al iniciar cada sesión se inyecta el perfil, el stack, las decisiones, las convenciones, el diseño y las tareas abiertas. En cada prompt se añaden las memorias más relevantes (auto-recall).
 - **Protocolo común**: todos los agentes leen el contexto antes de trabajar y guardan solo conocimiento durable al terminar.
 - **Compartir con tu equipo**: la base de datos no se sube a git. Usa `agentes memory export` para generar `.agentes/memory.json` y súbelo; quien lo reciba ejecuta `agentes memory import`.
 
-## 4. Comandos para modificar y mejorar el harness
+## 6. Comandos para modificar y mejorar el harness
 
 ### Instalación y mantenimiento
 ```bash
@@ -85,6 +143,8 @@ agentes doctor                                    # diagnóstico: PATH, MCP, hoo
 agentes requisitos                                # software del harness + del proyecto; instala lo que falte (s/n)
 agentes requisitos --check | --yes | --solo-requeridos | --lista
 agentes uninstall [--purge]                       # quitar del proyecto (--purge borra también la memoria)
+agentes ide list | add kiro | remove claude       # IDEs para los que se genera el equipo
+agentes migrate [--apply] [--keep] [--include G]  # migrar .md y configuraciones previas (ver sección 4)
 ./install.sh                                      # reinstalar el CLI (por ejemplo, tras añadir dependencias)
 ```
 
@@ -156,13 +216,15 @@ agentes task list [--all] [-s doing] · set <id> <estado> [nota] · done <ids> �
      auto_recall: false
    ```
 
-## 5. Estructura
+## 7. Estructura
 
 ```
 agentes/
   team.yaml        # ÚNICA fuente de verdad: agentes, flujos, cuestionarios, protocolo, ajustes
   cli.py           # CLI `agentes`
   installer.py     # genera .claude/* , hooks, .mcp.json y el bloque de CLAUDE.md (sin pisar lo tuyo)
+  kiro.py          # genera .kiro/agents, steering, hooks v1, mcp.json y recetas de workflows
+  migrate.py       # detección, migración a la BD, respaldo y restauración de configuraciones previas
   store.py         # memoria: SQLite + FTS5 + ChromaDB (híbrida), perfil, tareas
   scanner.py       # análisis de proyectos existentes + indexado incremental de código
   mcp_server.py    # servidor MCP sin dependencias (memory_*, profile_*, task_*, project_context)

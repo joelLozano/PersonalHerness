@@ -122,3 +122,47 @@ def test_requisitos_check(tmp_path):
     assert "noexiste" in p.stdout and "actualizar" in p.stdout
     lista = subprocess.run(["bash", str(script), "--lista"], capture_output=True, text=True, env=env)
     assert "claude" in lista.stdout and "docker" in lista.stdout
+
+
+def test_kiro_generation(proj):
+    from agentes.installer import set_ides
+    set_ides(proj, ["kiro"])
+    res = sync(proj)
+    assert res["ides"] == ["kiro"] and res["workflows"] == 4
+    agent = (proj / ".kiro/agents/tech-lead.md").read_text()
+    assert agent.startswith("---\nname: tech-lead") and "'@agentes'" in agent and "mcp__agentes__" not in agent
+    steer = (proj / ".kiro/steering/feature.md").read_text()
+    assert steer.startswith("---\ninclusion: manual\n---") and "$ARGUMENTS" not in steer
+    assert (proj / ".kiro/steering/agentes-equipo.md").read_text().startswith("---\ninclusion: always\n---")
+    hooks = json.loads((proj / ".kiro/hooks/agentes.json").read_text())
+    assert hooks["version"] == "v1" and {h["trigger"] for h in hooks["hooks"]} == {"SessionStart", "UserPromptSubmit", "PostTaskExec"}
+    wf = json.loads((proj / ".kiro/workflows/agentes-feature.workflow.json").read_text())
+    assert wf["name"] == "agentes-feature" and wf["inputs"]["task"] == "prompt"
+    assert "agentes" in json.loads((proj / ".kiro/settings/mcp.json").read_text())["mcpServers"]
+    assert not (proj / ".claude/agents").exists() and not (proj / ".mcp.json").exists()
+
+
+def test_migrate_apply_restore(proj):
+    sync(proj)
+    (proj / "CLAUDE.md").write_text((proj / "CLAUDE.md").read_text() + "\n# Reglas\nNunca uses var en JavaScript.\n")
+    (proj / "AGENTS.md").write_text("# Seguridad\nNo subas secretos al repositorio.\n")
+    (proj / ".claude/agents/docs-writer.md").write_text("---\nname: docs-writer\ndescription: Docs\ntools: Read\n---\nEscribe docs.\n")
+    (proj / ".kiro/steering").mkdir(parents=True)
+    (proj / ".kiro/steering/release.md").write_text("---\ninclusion: manual\n---\nGenera el changelog.\n")
+    original = {p: (proj / p).read_text() for p in ("AGENTS.md", ".claude/agents/docs-writer.md", ".kiro/steering/release.md")}
+    from agentes.migrate import apply, detect, restore
+    items = detect(proj)
+    assert {i.path for i in items} >= {"CLAUDE.md", "AGENTS.md", ".claude/agents/docs-writer.md", ".kiro/steering/release.md"}
+    assert not any(i.path.startswith("src/") or i.path == "package.json" for i in items)
+    st = apply(proj, items, log=lambda *_: None)
+    assert st["agentes"] == 1 and st["comandos"] == 1 and not (proj / "AGENTS.md").exists()
+    s = Store(proj, use_vectors=False)
+    assert "Nunca uses var" in s.context_summary()  # regla siempre presente
+    assert s.search("secretos repositorio", "security")
+    assert "docs-writer" in (proj / ".agentes/team.local.yaml").read_text()
+    assert (proj / ".claude/agents/docs-writer.md").read_text().count("Generado por") == 1
+    assert (proj / "src/pay.ts").exists() and (proj / "package.json").exists()  # el proyecto no se toca
+    restore(proj, log=lambda *_: None)
+    for p, txt in original.items():
+        assert (proj / p).read_text() == txt
+    assert "Nunca uses var" not in Store(proj, use_vectors=False).context_summary()

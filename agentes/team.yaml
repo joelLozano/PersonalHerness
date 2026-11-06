@@ -461,3 +461,238 @@ settings:
   auto_recall: true          # inyecta memorias relevantes en cada prompt
   auto_recall_k: 4
   auto_recall_min_chars: 20
+
+# =============================================================================
+# Kiro (IDE / CLI / Web). Se genera solo si el proyecto tiene Kiro activado
+# (`agentes install --ide kiro` o `agentes ide add kiro`).
+#   agentes  -> .kiro/agents/<nombre>.md          (sub-agentes y agentes de pasos de workflow)
+#   comandos -> .kiro/steering/<nombre>.md        (steering `manual` = comando /<nombre> en el chat)
+#   orquestador -> .kiro/steering/agentes-equipo.md (steering `always`)
+#   hooks    -> .kiro/hooks/agentes.json          (SessionStart, UserPromptSubmit, PostTaskExec)
+#   MCP      -> .kiro/settings/mcp.json           (servidor "agentes": memoria, perfil, tareas)
+#   workflows -> .kiro/workflows/<nombre>.workflow.json
+# Por agente puedes definir `kiro_model` (id de modelo de Kiro, ej. claude-sonnet-4.6) y
+# `kiro_tools` (lista de herramientas de Kiro). Si no, se hereda el modelo de la sesión.
+# =============================================================================
+kiro:
+  generate_workflows: true   # pon false en team.local.yaml si no usas Workflows de Kiro
+  toolsets:
+    readonly: [read, shell, web, "@agentes"]
+    full: ["*"]
+
+  orchestrator: |
+    # Equipo de agentes (gestionado por `agentes`; se regenera con `agentes sync`)
+    Eres el **orquestador** de un equipo de desarrollo. Al empezar una tarea llama a la herramienta MCP
+    `project_context` (servidor `agentes`) y usa `memory_search` antes de decidir.
+
+    ## Cómo repartir el trabajo en Kiro
+    - **Tareas pequeñas o preguntas** → resuélvelas en el chat; delega en sub-agentes del equipo cuando
+      ayude (tech-lead, product-analyst, ux-designer, backend-dev, frontend-dev, code-reviewer,
+      qa-engineer, security-engineer, devops-engineer).
+    - **Planear una feature** → usa una **Spec de Kiro** (requirements.md / design.md / tasks.md). Antes
+      de escribirla consulta la memoria (perfil, decisiones, diseño). Las specs se indexan solas en la memoria.
+    - **Entregar una feature completa con revisiones** → si Workflows está habilitado, lanza la receta
+      `agentes-feature`; si no, sigue el flujo del comando /feature con sub-agentes.
+    - **Bugs** → receta `agentes-bugfix` o una Bugfix Spec. **Auditorías** → receta `agentes-security-audit`.
+    - Los sub-agentes no ven las Specs: pásales la ruta de la spec o el texto relevante en la delegación.
+
+    ## Memoria
+    - El conocimiento del proyecto vive en la base de datos de `.agentes/` (herramientas MCP `agentes`).
+      No crees archivos .md de notas o decisiones: guarda con `memory_add`.
+    - Respeta el nivel de autonomía del perfil (clave `autonomia`).
+    - Comandos manuales: /kickoff, /onboard, /feature, /plan, /implement, /review, /test, /security,
+      /design, /fix, /tasks, /remember, /recall, /retro.
+
+  # Texto que se antepone a algunos comandos en Kiro (aprovechan Specs/Workflows).
+  command_notes:
+    feature: |
+      > En Kiro: si **Workflows** está habilitado, ejecuta la receta `agentes-feature` con
+      > `task` = la descripción y `feature` = un nombre corto en kebab-case, y monitorea en el panel Workflows.
+      > Si no está habilitado, sigue los pasos de abajo con sub-agentes.
+    plan: |
+      > En Kiro: crea una **Feature Spec** en `.kiro/specs/<nombre-corto>/` (requirements.md con criterios
+      > EARS, design.md y tasks.md). Usa product-analyst y tech-lead para redactarlas y registra las
+      > decisiones en memoria. Crea también las tareas en el tablero (`task_create`, feature=<nombre-corto>).
+    fix: |
+      > En Kiro: si Workflows está habilitado usa la receta `agentes-bugfix`; para bugs con riesgo de
+      > regresión alto puedes usar una **Bugfix Spec**.
+    security: |
+      > En Kiro: si Workflows está habilitado usa la receta `agentes-security-audit`.
+    onboard: |
+      > En Kiro: si Workflows está habilitado puedes ejecutar la receta `agentes-onboard` para la
+      > exploración (paso 2) en segundo plano; las preguntas al usuario hazlas en este chat.
+
+  # Recetas de Workflows (formato oficial .workflow.json; aquí en YAML).
+  workflows:
+    agentes-feature:
+      description: "Equipo agentes: requisitos y diseño (spec de Kiro) → aprobación → implementación con revisión, QA y seguridad en ciclo"
+      inputs: {task: prompt, feature: string}
+      steps:
+        - type: step
+          id: requisitos
+          agent: product-analyst
+          prompt: |
+            Feature: {{task}}
+            Escribe .kiro/specs/{{feature}}/requirements.md (historias de usuario y criterios de aceptación en
+            formato EARS, alcance y fuera de alcance), consultando antes la memoria (project_context, memory_search).
+            Si hay ambigüedades importantes, envía un mensaje de advertencia con las preguntas y espera respuesta.}/requirements.md"}
+        - type: step
+          id: diseno
+          agent: tech-lead
+          prompt: |
+            Con los requisitos en .kiro/specs/{{feature}}/requirements.md, escribe .kiro/specs/{{feature}}/design.md (arquitectura,
+            modelo de datos, contratos, errores, seguridad, pruebas) y .kiro/specs/{{feature}}/tasks.md (checklist
+            de tareas pequeñas, cada una indicando el responsable: backend-dev, frontend-dev, ux-designer o
+            devops-engineer). Registra decisiones con memory_add y crea las tareas con task_create (feature={{feature}}).}/design.md", tasks: ".kiro/specs/{{feature}}/tasks.md"}
+        - type: step
+          id: aprobacion
+          agent: tech-lead
+          prompt: |
+            Resume el plan (.kiro/specs/{{feature}}/design.md y .kiro/specs/{{feature}}/tasks.md) en pocas líneas y pide aprobación al usuario
+            enviando un mensaje de advertencia. Incorpora los cambios que pida. Cuando apruebe, termina tu respuesta
+            con el texto PLAN APROBADO.
+          completion: {containsText: "PLAN APROBADO"}
+        - type: repeat
+          id: ciclo-entrega
+          maxIterations: 3
+          onMaxIterations: pause
+          stopCondition: {containsText: "VEREDICTO: APROBADO"}
+          steps:
+            - type: parallel
+              id: implementacion
+              joinPolicy: allSettled
+              branches:
+                - type: step
+                  id: backend
+                  agent: backend-dev
+                  prompt: |
+                    Implementa las tareas de .kiro/specs/{{feature}}/tasks.md asignadas a backend-dev (y corrige los hallazgos de
+                    revisiones previas si los hay en .kiro/workflow-output/agentes-revision.md). Ejecuta las pruebas.
+                    Si no tienes tareas, termina indicando que no hay trabajo de backend.
+                - type: step
+                  id: frontend
+                  agent: frontend-dev
+                  prompt: |
+                    Implementa las tareas de .kiro/specs/{{feature}}/tasks.md asignadas a frontend-dev o ux-designer (y corrige los
+                    hallazgos previos en .kiro/workflow-output/agentes-revision.md si existe). Ejecuta lint, build y pruebas.
+                    Si no tienes tareas, termina indicando que no hay trabajo de frontend.
+            - type: parallel
+              id: verificacion
+              joinPolicy: allSettled
+              branches:
+                - type: step
+                  id: revision
+                  agent: code-reviewer
+                  prompt: "Revisa el diff de la feature {{feature}} contra .kiro/specs/{{feature}}/design.md. No edites archivos."
+                - type: step
+                  id: qa
+                  agent: qa-engineer
+                  prompt: "Verifica los criterios de aceptación de .kiro/specs/{{feature}}/requirements.md: escribe y ejecuta las pruebas faltantes y reporta resultados."
+                - type: step
+                  id: seguridad
+                  agent: security-engineer
+                  prompt: "Audita los cambios de la feature {{feature}} (entradas, auth, datos, dependencias). No edites archivos."
+            - type: step
+              id: consolidar
+              agent: qa-engineer
+              prompt: |
+                Consolida estos reportes en .kiro/workflow-output/agentes-revision.md:
+
+                {{revision.output}}
+
+                {{qa.output}}
+
+                {{seguridad.output}}
+
+                Si no hay hallazgos bloqueantes (🔴), problemas importantes (🟠) ni pruebas fallando, termina con
+                "VEREDICTO: APROBADO"; si los hay, termina con "VEREDICTO: CAMBIOS".
+        - type: step
+          id: cierre
+          agent: tech-lead
+          prompt: |
+            Cierra la feature {{feature}}: marca en .kiro/specs/{{feature}}/tasks.md y en el tablero (task_update) lo terminado,
+            guarda los aprendizajes con memory_add y entrega un resumen con cómo probarlo y un mensaje de commit
+            sugerido (Conventional Commits). No hagas commit.
+
+    agentes-bugfix:
+      description: "Equipo agentes: reproducir con test → causa raíz y corrección → verificación y revisión"
+      inputs: {bug: prompt}
+      steps:
+        - type: step
+          id: reproducir
+          agent: qa-engineer
+          prompt: "Bug: {{bug}}. Busca contexto con memory_search (kinds bug,code), escribe un test que lo reproduzca y confirma que falla."
+        - type: repeat
+          id: ciclo-fix
+          maxIterations: 3
+          onMaxIterations: pause
+          stopCondition: {containsText: "TESTS OK"}
+          steps:
+            - type: step
+              id: corregir
+              agent: backend-dev
+              prompt: |
+                Encuentra la causa raíz (no parches síntomas) y corrige el bug: {{bug}}.
+                Test de reproducción y notas: {{reproducir.output}}
+            - type: step
+              id: verificar
+              agent: qa-engineer
+              prompt: "Ejecuta el test de reproducción y la suite relevante. Si todo pasa termina con 'TESTS OK'; si no, describe qué falla."
+        - type: step
+          id: revisar
+          agent: code-reviewer
+          prompt: "Revisa el diff de la corrección y guarda el bug con su causa raíz (memory_add kind=bug). No edites archivos."
+
+    agentes-security-audit:
+      description: "Equipo agentes: auditoría de seguridad en paralelo por áreas y tareas de remediación"
+      inputs: {alcance: string}
+      steps:
+        - type: parallel
+          id: auditorias
+          joinPolicy: allSettled
+          branches:
+            - {type: step, id: auth-api, agent: security-engineer, prompt: "Audita autenticación, autorización/IDOR y la API en: {{alcance}}. No edites archivos."}
+            - {type: step, id: entradas-frontend, agent: security-engineer, prompt: "Audita validación de entradas, XSS/CSRF/SSRF y el frontend en: {{alcance}}. No edites archivos."}
+            - {type: step, id: deps-infra, agent: security-engineer, prompt: "Audita dependencias vulnerables, secretos, configuración e infraestructura en: {{alcance}}. No edites archivos."}
+        - type: step
+          id: consolidar
+          agent: security-engineer
+          prompt: |
+            Consolida por severidad sin duplicados:
+
+            {{auth-api.output}}
+
+            {{entradas-frontend.output}}
+
+            {{deps-infra.output}}
+
+            Crea tareas de remediación (task_create) para hallazgos Críticos y Altos y guarda las políticas relevantes (memory_add kind=security).
+
+    agentes-onboard:
+      description: "Equipo agentes: escaneo del proyecto existente y exploración en paralelo (arquitectura, pruebas, seguridad, diseño)"
+      steps:
+        - type: step
+          id: escaneo
+          agent: tech-lead
+          prompt: "Ejecuta `agentes scan`, `agentes index` y `agentes requisitos --check` y resume los resultados."
+        - type: parallel
+          id: exploracion
+          joinPolicy: allSettled
+          branches:
+            - {type: step, id: arquitectura, agent: tech-lead, prompt: "Con este escaneo: {{escaneo.output}}\nDescribe la arquitectura real, capas, flujos y deuda técnica. Guarda decisiones (kind=decision) y convenciones (kind=convention)."}
+            - {type: step, id: pruebas, agent: qa-engineer, prompt: "Determina cómo se ejecutan las pruebas, ejecútalas (sin modificarlas) y reporta estado, cobertura aproximada y huecos."}
+            - {type: step, id: riesgos, agent: security-engineer, prompt: "Revisión rápida de riesgos evidentes: secretos, dependencias, auth. No edites archivos."}
+            - {type: step, id: diseno, agent: ux-designer, prompt: "Si hay frontend, extrae el sistema de diseño existente (colores, tipografía, componentes) y guárdalo (kind=design). Si no hay, indícalo."}
+        - type: step
+          id: informe
+          agent: tech-lead
+          prompt: |
+            Une los hallazgos en un informe (qué hace el proyecto, stack, cómo correrlo y probarlo, salud, riesgos, plan sugerido):
+
+            {{arquitectura.output}}
+
+            {{pruebas.output}}
+
+            {{riesgos.output}}
+
+            {{diseno.output}}

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentes"
-version = "0.1.0"
-description = "Harness de equipo de desarrollo profesional (multi-agente) para Claude Code, con memoria vectorial"
+version = "0.2.0"
+description = "Harness de equipo de desarrollo profesional (multi-agente) para Claude Code y Kiro, con memoria vectorial"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["pyyaml>=6"]
