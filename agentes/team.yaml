@@ -19,12 +19,14 @@ toolsets:
 # Protocolo común que se antepone a TODOS los agentes.
 shared_protocol: |
   ## Protocolo del equipo
-  - **Contexto**: empieza con `mcp__agentes__project_context` (incluye el mapa del código). Si no te indicaron
+  - **Contexto**: empieza con `mcp__agentes__project_context` con `role` = tu nombre de agente (te da solo lo que tu
+    rol necesita: arquitectura, comandos, mapa del código, features y sus capas). Si no te indicaron
     archivos, usa `mcp__agentes__code_locate` y lee solo esas líneas antes de explorar más; `memory_search` para
     decisiones y convenciones. El perfil (stack, diseño, convenciones, idioma) manda sobre tus preferencias.
   - **Tareas**: actualiza la tuya con `task_update` (doing → review/testing/done); trabajo nuevo con `task_create`.
   - **Memoria**: al terminar guarda solo lo durable con `memory_add` (decisiones y su porqué, convenciones, gotchas,
-    bugs con causa raíz). Corrige memorias obsoletas.
+    bugs con causa raíz). Si cambias la arquitectura (capas, patrón, DI, módulos), actualiza la memoria
+    `architecture` (borra la anterior con `memory_delete`). Corrige memorias obsoletas.
   - **Calidad**: cambios mínimos; verifica leyendo el código; ejecuta tests/lint/build reales del proyecto.
   - **Git (regla del usuario)**: NUNCA hagas commit (tampoco `--amend`), ni crees, renombres o borres ramas
     (`git branch <x>`, `checkout -b`, `switch -c`, `worktree add`), ni hagas push. Aunque te lo pidan: deja los
@@ -51,7 +53,8 @@ agents:
       - Propón el diseño técnico: componentes/módulos afectados, modelo de datos, contratos de API,
         flujo, manejo de errores, impacto en seguridad y rendimiento, estrategia de pruebas.
       - Considera alternativas y elige la más simple que cumpla; registra la decisión con `memory_add`
-        (kind=decision) incluyendo el porqué.
+        (kind=decision) incluyendo el porqué. Si el diseño cambia la arquitectura (capas, patrón, módulos), actualiza la
+        memoria kind=architecture.
       - Divide el trabajo en tareas pequeñas y verificables con `task_create`, cada una con criterios
         de aceptación y `assignee` (backend-dev, frontend-dev, ux-designer, qa-engineer, security-engineer,
         devops-engineer) y la misma `feature`.
@@ -264,7 +267,9 @@ commands:
          dile al usuario que ejecute `agentes requisitos` en su terminal (instalación interactiva s/n).
       2. Explora en paralelo con subagentes (solo lectura):
          - `tech-lead`: arquitectura real, capas, patrones, puntos de entrada, flujo de datos principal,
-           deuda técnica. Guarda decisiones implícitas (kind=decision) y convenciones (kind=convention).
+           deuda técnica. Guarda UNA memoria kind=architecture (≤120 palabras: patrón, capas y su ubicación, DI,
+           navegación, módulos; se inyecta en cada sesión), decisiones implícitas (kind=decision) y convenciones
+           (kind=convention). Usa el catálogo "Features" del contexto como punto de partida.
          - `qa-engineer`: cómo se ejecutan las pruebas, si pasan hoy, cobertura aproximada y huecos.
            (Solo ejecuta los tests; no los modifiques en este paso.)
          - `security-engineer`: revisión rápida de riesgos evidentes (secretos, dependencias, auth).
@@ -302,7 +307,8 @@ commands:
       3. **Implementación** → `backend-dev` / `frontend-dev` / `devops-engineer` por tarea; en paralelo si son independientes.
       4. **Verificación** en paralelo: `code-reviewer`, `qa-engineer` y `security-engineer` (si aplica).
       5. **Corrección**: si hay 🔴/🟠 o tests fallando, repite (máx. 2 ciclos; luego informa).
-      6. **Cierre**: tareas en `done`, aprendizajes en memoria, resumen y mensaje de commit sugerido. No hagas commit
+      6. **Cierre**: tareas en `done`, aprendizajes en memoria, UNA memoria kind=feature ("<Nombre>: qué hace; módulos
+         y archivos clave; decisiones", ≤60 palabras), resumen y mensaje de commit sugerido. No hagas commit
          ni crees ramas: eso lo hace el usuario.
 
   plan:
@@ -437,7 +443,8 @@ commands:
     body: |
       Retrospectiva de: $ARGUMENTS (si está vacío: el trabajo reciente).
       1. Revisa tareas terminadas, memorias recientes (`memory_list`) y `git log` reciente.
-      2. Consolida: elimina memorias duplicadas/obsoletas y fusiona las similares.
+      2. Consolida: elimina memorias duplicadas/obsoletas y fusiona las similares. Verifica que la memoria
+         `architecture` siga siendo cierta (compárala con el catálogo "Features" del contexto) y actualízala si no.
       3. Identifica fricciones del equipo (agentes que fallaron, pasos repetidos, convenciones ignoradas).
       4. Propón cambios concretos al harness en `.agentes/team.local.yaml` (prompts adicionales por agente
          con `extra_prompt`, nuevos agentes o comandos) mostrando el YAML exacto. Aplícalos solo si el usuario
@@ -517,7 +524,8 @@ questions:
 # Instrucciones del orquestador que se insertan en CLAUDE.md (bloque gestionado).
 orchestrator: |
   ## Equipo de agentes (gestionado por `agentes`; no editar este bloque)
-  Eres el **orquestador** de un equipo de desarrollo. Contexto inicial: `mcp__agentes__project_context`.
+  Eres el **orquestador** de un equipo de desarrollo. El contexto del proyecto ("# Contexto del proyecto") ya
+  llega al iniciar la sesión: NO llames a `project_context` salvo que no lo veas. Los sub-agentes sí deben llamarlo.
   - **Triaje**: cada mensaje trae un bloque "Triaje agentes" (tipo, peso XS-XL, ruta y código probable). Síguelo:
     XS/S → hazlo tú directamente, sin sub-agentes; M → plan breve + 1 verificación; L/XL → propone plan y costo y
     espera confirmación. Si no te indican archivos, empieza por los del triaje o por `code_locate`.
@@ -564,7 +572,8 @@ kiro:
 
   orchestrator: |
     # Equipo agentes (generado por `agentes sync`)
-    Eres el orquestador de un equipo de desarrollo. Contexto: herramienta MCP `project_context` (incluye el mapa del código).
+    Eres el orquestador de un equipo de desarrollo. El contexto del proyecto ("# Contexto del proyecto", con el mapa
+    del código y las features) llega al iniciar la sesión: llama a `project_context` solo si no lo ves.
     **Cada mensaje trae un bloque "Triaje agentes" (tipo, peso XS-XL, ruta, código probable). Síguelo:**
     - **XS / S** (ajustes, fixes acotados, preguntas): hazlo TÚ en esta sesión. NO delegues en agentes del equipo:
       con Workflows activado, cada delegación a un custom agent se ejecuta como workflow en segundo plano (caro).
@@ -647,7 +656,8 @@ kiro:
                 Revisa el diff de {{feature}} (corrección, casos límite, seguridad básica: entradas, auth, secretos) y verifica los
                 criterios de .kiro/specs/{{feature}}/requirements.md con pruebas. Escribe los hallazgos en
                 .kiro/workflow-output/{{feature}}-revision.md. Si no hay bloqueantes ni pruebas fallando: marca las tareas en el
-                tablero (task_update), guarda aprendizajes (memory_add) y termina con "VEREDICTO: APROBADO" y un mensaje de commit
+                tablero (task_update), guarda aprendizajes (memory_add) y UNA memoria kind=feature ("{{feature}}: qué hace;
+                módulos y archivos clave", ≤60 palabras) y termina con "VEREDICTO: APROBADO" y un mensaje de commit
                 sugerido; si los hay, termina con "VEREDICTO: CAMBIOS". Respuesta final ≤150 palabras.
 
     agentes-feature:
@@ -720,7 +730,8 @@ kiro:
 
                 {{seguridad.output}}
 
-                Si no hay 🔴, 🟠 ni pruebas fallando: marca tareas (task_update), guarda aprendizajes (memory_add) y termina con
+                Si no hay 🔴, 🟠 ni pruebas fallando: marca tareas (task_update), guarda aprendizajes (memory_add) y UNA
+                memoria kind=feature ("{{feature}}: qué hace; módulos y archivos clave", ≤60 palabras) y termina con
                 "VEREDICTO: APROBADO" y un mensaje de commit sugerido; si los hay, termina con "VEREDICTO: CAMBIOS".
 
     agentes-bugfix:
@@ -795,7 +806,7 @@ kiro:
           id: exploracion
           joinPolicy: allSettled
           branches:
-            - {type: step, id: arquitectura, agent: tech-lead, effortLevel: high, prompt: "Con este escaneo: {{escaneo.output}}\nDescribe la arquitectura real, capas, flujos y deuda técnica (≤250 palabras). Guarda decisiones (kind=decision) y convenciones (kind=convention)."}
+            - {type: step, id: arquitectura, agent: tech-lead, effortLevel: high, prompt: "Con este escaneo: {{escaneo.output}}\nDescribe la arquitectura real, capas, flujos y deuda técnica (≤250 palabras). Guarda UNA memoria kind=architecture (≤120 palabras: patrón, capas y ubicación, DI, navegación, módulos), decisiones (kind=decision) y convenciones (kind=convention)."}
             - {type: step, id: pruebas, agent: qa-engineer, effortLevel: medium, prompt: "Determina cómo se ejecutan las pruebas, ejecútalas (sin modificarlas) y reporta estado, cobertura aproximada y huecos (≤150 palabras)."}
             - {type: step, id: riesgos, agent: security-engineer, effortLevel: medium, prompt: "Revisión rápida de riesgos evidentes: secretos, dependencias, auth. No edites archivos (≤150 palabras)."}
             - {type: step, id: diseno, agent: ux-designer, effortLevel: low, prompt: "Si hay frontend, extrae el sistema de diseño existente (colores, tipografía, componentes) y guárdalo (kind=design); si no hay, responde 'SIN FRONTEND' (≤120 palabras)."}

@@ -41,9 +41,13 @@ def tool(name: str, spec: dict):
     return deco
 
 
-@tool("project_context", _s("Resumen del proyecto (reglas, perfil, decisiones, diseño, tareas). Llamar al empezar."))
-def _ctx():
-    return store().context_summary(8000)
+@tool("project_context", _s(
+    "Resumen del proyecto (reglas, perfil, arquitectura, comandos, mapa del código, features, decisiones, tareas). "
+    "Sub-agentes: llámalo al empezar con role=<tu nombre> para recibir solo lo que tu rol necesita.",
+    role={"type": "string", "description": "Nombre del agente (qa-engineer, ios-dev, ux-designer…); vacío = todo"},
+))
+def _ctx(role: str | None = None):
+    return store().context_summary(8000, role=(role or "").strip() or None)
 
 
 @tool("memory_search", _s(
@@ -237,7 +241,7 @@ def handle(msg: dict) -> None:
             "protocolVersion": params.get("protocolVersion", "2025-06-18"),
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": "agentes", "version": __version__},
-            "instructions": "Memoria persistente, perfil y tareas del proyecto. Empieza con project_context.",
+            "instructions": "Memoria persistente, perfil, features y tareas del proyecto. Sub-agentes: empieza con project_context(role=<tu nombre>).",
         })
     elif method == "ping":
         _reply(id_, {})

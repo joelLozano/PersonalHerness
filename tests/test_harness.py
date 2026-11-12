@@ -676,3 +676,99 @@ def test_clean_y_proyectos(proj):
     assert not old.exists() and not (proj / ".claude/agents/viejo.md").exists() and not (proj / ".cursor").exists()
     assert (proj / ".agentes/backup/clean-test/.kiro/hooks/viejo.kiro.hook").exists()  # respaldado
     assert (proj / ".claude/agents/tech-lead.md").exists() and (proj / "src/pay.ts").exists()  # lo activo no se toca
+
+
+# ------------------------------------------------------------------ contexto, catálogo de features y símbolos
+def test_contexto_no_recorta_comandos_y_prioriza(proj):
+    from agentes.scanner import save_scan, scan
+    s = Store(proj, use_vectors=False)
+    largo = "xcodebuild -project Tienda.xcodeproj -scheme Tienda -destination 'platform=iOS Simulator,name=iPhone 16' test"
+    s.add(f"Comandos del proyecto en ios: build => {largo.replace(' test', ' build')}; test => {largo}", "scan")
+    for i in range(40):
+        s.add(f"Aprendizaje número {i} " + "detalle " * 30, "learning")
+    s.add("MVVM + Clean: Features/<X>/{Presentation,Domain,Data}; DI con Resolver", "architecture")
+    ctx = s.context_summary(1500)
+    assert len(ctx) <= 1500
+    assert f"`{largo}`" in ctx  # el comando completo, nunca cortado
+    assert "## Arquitectura" in ctx and "Resolver" in ctx
+    assert all(not l.endswith("detal") for l in ctx.splitlines())  # se quitan líneas completas
+
+
+def test_contexto_por_rol(proj):
+    s = Store(proj, use_vectors=False)
+    s.add("Paleta: primario #22C55E", "design")
+    s.add("Comandos del proyecto en package.json: test => vitest", "scan")
+    s.add("Usamos Clean + MVVM", "architecture")
+    qa = s.context_summary(role="qa-engineer")
+    ux = s.context_summary(role="ux-designer")
+    assert "vitest" in qa and "#22C55E" not in qa
+    assert "#22C55E" in ux and "vitest" not in ux and "Clean + MVVM" not in ux
+    assert "vitest" in s.context_summary() and "#22C55E" in s.context_summary()
+
+
+def test_simbolos_capas_y_features():
+    from agentes.features import extract
+    swift = "import SwiftUI\n\nfinal class CheckoutViewModel: ObservableObject {}\nstruct CheckoutView: View {}\n"
+    syms = {x["name"]: x for x in extract("Tienda/Features/Checkout/CheckoutViewModel.swift", swift)}
+    assert syms["CheckoutViewModel"]["layer"] == "presentación" and syms["CheckoutViewModel"]["line"] == 3
+    assert syms["CheckoutView"]["layer"] == "UI" and syms["CheckoutView"]["feature"] == "Checkout"
+    kt = ("package a\n\ninterface OrdersRepository\nclass GetOrdersUseCase(private val r: OrdersRepository)\n"
+          "@Composable\nfun OrdersScreen() {}\n")
+    k = {x["name"]: x for x in extract("feature/orders/src/main/java/a/domain/GetOrdersUseCase.kt", kt)}
+    assert k["GetOrdersUseCase"]["layer"] == "dominio" and k["OrdersScreen"]["kind"]
+    assert k["GetOrdersUseCase"]["feature"] == "Orders"
+    assert extract("Tienda/Tests/CheckoutTests.swift", "final class CheckoutTests {}") == []  # los tests no cuentan
+
+
+def test_catalogo_de_features_y_triaje_mobile(mob):
+    from agentes.scanner import index_code
+    from agentes.triage import render, triage
+    s = Store(mob, use_vectors=False)
+    st = index_code(s, mob)
+    assert st["symbols"] > 0 and st["features"] >= 2
+    ctx = s.context_summary()
+    assert "## Features" in ctx and "Checkout [ios]" in ctx and "CheckoutViewModel" in ctx
+    assert "DesignSystem [" not in ctx  # el DS tiene su propio catálogo
+    res = triage(mob, "migra el checkout a clean architecture", store=s)
+    assert res["tipo"] == "refactor" and res["peso"] in ("L", "XL")
+    out = render(res)
+    assert "Feature(s) mencionadas" in out and "Checkout [ios]" in out
+    assert "CheckoutViewModel.swift" in out
+    # sin tareas de actualización, los archivos de build no son "código probable"
+    res2 = triage(mob, "agrega el modularizado de checkout con dependencias por módulo", store=s)
+    assert not any(f["archivo"].endswith((".gradle.kts", "Package.swift")) for f in res2.get("archivos", []))
+    # símbolo exacto → su archivo y línea primero
+    from agentes.triage import locate
+    assert locate(s, "el CheckoutViewModel no calcula")[0]["archivo"].endswith("CheckoutViewModel.swift")
+    # reindexar sin cambios no reescribe el catálogo
+    before = s.db.execute("SELECT id FROM memories WHERE tags='features'").fetchone()[0]
+    index_code(s, mob)
+    assert s.db.execute("SELECT id FROM memories WHERE tags='features'").fetchone()[0] == before
+
+
+def test_triaje_arquitectura():
+    from agentes.triage import classify
+    r = classify("Crea este feature modularizado, migralo siguiendo CLEAN architecture y solid")
+    assert r["tipo"] == "refactor" and r["peso"] == "L"
+    assert classify("migra a SwiftUI la pantalla de perfil")["tipo"] == "update"
+    assert classify("el CheckoutViewModel no calcula el total")["tipo"] == "fix"
+
+
+def test_recall_en_comandos_slash(proj, capsys):
+    import types
+    from agentes import cli
+    s = Store(proj, use_vectors=False)
+    (proj / ".agentes").mkdir(exist_ok=True)
+    s.add("Los cupones se validan en el backend con CouponService", "decision")
+    cli._recall(proj, {"prompt": "/feature agregar cupones de descuento al checkout con CouponService", "session_id": "x"})
+    assert "CouponService" in capsys.readouterr().out
+    cli._recall(proj, {"prompt": "/remember cupones con CouponService", "session_id": "y"})
+    assert capsys.readouterr().out == ""
+
+
+def test_orquestador_no_duplica_contexto(proj):
+    sync(proj)
+    md = (proj / "CLAUDE.md").read_text()
+    assert "NO llames a `project_context`" in md
+    agent = (proj / ".claude/agents/qa-engineer.md").read_text()
+    assert "role" in agent and "project_context" in agent

@@ -477,6 +477,27 @@ def save_scan(store: Store, r: dict) -> None:
         store.add("Mapa del código:\n" + "\n".join(f"- {l}" for l in r["code_map"]), kind="scan",
                   tags="mapa", source="agentes scan")
     (store.dir / "scan.json").write_text(json.dumps(r, ensure_ascii=False, indent=2))
+    refresh_catalog(store, Path(store.root))
+
+
+def refresh_catalog(store: Store, root: Path) -> list[str]:
+    """Regenera la memoria con el catálogo de features (desde la tabla de símbolos; no lee archivos)."""
+    from . import features
+    try:
+        from .ds import configured_paths
+        ds_paths = [p for ps in configured_paths(root).values() for p in ps]
+    except Exception:
+        ds_paths = []
+    lines = features.catalog(store, ds_paths)
+    text = "Features del proyecto (capas detectadas en el código):\n" + "\n".join(lines) if lines else ""
+    old = store.db.execute("SELECT id, text FROM memories WHERE kind='scan' AND tags='features'").fetchall()
+    if [r[1] for r in old] == ([text] if text else []):
+        return lines  # sin cambios: no reescribir la memoria
+    if old:
+        store.delete([r[0] for r in old])
+    if text:
+        store.add(text, kind="scan", tags="features", source="agentes index")
+    return lines
 
 
 # ------------------------------------------------------------------------------ indexado
@@ -506,18 +527,26 @@ def index_code(store: Store, root: Path, max_file_kb: int = 150, progress=None) 
              if _indexable(root, f) and f.suffix.lower() in CODE_EXTS and f.stat().st_size <= max_file_kb * 1024
              and not f.name.endswith((".lock", "-lock.json", ".min.js", ".map"))
              and f.name not in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "CLAUDE.md", ".mcp.json", "AGENTS.md")]
+    from . import features
     known = {r["path"]: (r["hash"], r["chunk_ids"]) for r in store.db.execute("SELECT * FROM files")}
+    ver = store.db.execute("SELECT value FROM meta WHERE key='symbols_version'").fetchone()
+    backfill = not ver or ver[0] != features.SYMBOLS_VERSION  # índice de símbolos nuevo o con otra versión: rehacer
+    if backfill:
+        store.db.execute("DELETE FROM symbols")
     seen, added, skipped, removed = set(), 0, 0, 0
     for n, f in enumerate(files):
-        rel = str(f.relative_to(root))
+        rel = f.relative_to(root).as_posix()
         seen.add(rel)
         text = _read(f)
         if not text.strip():
             continue
         h = hashlib.sha256(text.encode()).hexdigest()[:24]
         if rel in known and known[rel][0] == h:
+            if backfill:
+                features.save(store, rel, features.extract(rel, text))
             skipped += 1
             continue
+        features.save(store, rel, features.extract(rel, text))
         if rel in known:
             store.delete(json.loads(known[rel][1]))
         kind = "spec" if rel.startswith(".kiro/specs/") else "code"
@@ -535,6 +564,11 @@ def index_code(store: Store, root: Path, max_file_kb: int = 150, progress=None) 
         if rel not in seen:
             store.delete(json.loads(ids))
             store.db.execute("DELETE FROM files WHERE path=?", (rel,))
+            store.db.execute("DELETE FROM symbols WHERE path=?", (rel,))
             removed += 1
+    store.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('symbols_version', ?)", (features.SYMBOLS_VERSION,))
     store.db.commit()
-    return {"files": len(files), "indexed": added, "unchanged": skipped, "removed": removed}
+    feats = refresh_catalog(store, root)
+    n_syms = store.db.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    return {"files": len(files), "indexed": added, "unchanged": skipped, "removed": removed, "symbols": n_syms,
+            "features": len([l for l in feats if not l.startswith("- (+")])}

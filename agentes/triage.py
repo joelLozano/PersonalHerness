@@ -25,12 +25,14 @@ TYPES: "OrderedDict[str, tuple[str, str]]" = OrderedDict([
     ("seguridad", (r"vulnerab|seguridad|security|owasp|audit|secreto|secret|inyecci|injection|xss|csrf|permisos? de acceso", "M")),
     ("fix", (r"\bbug|error|falla|fallo|\bfix|arregl|corrig|no funciona|not working|crash|excepci|exception|roto|broken|\b500\b|"
              r"undefined|null pointer|se cae|no carga|no guarda|no aparece|regresi|\bmal\b|incorrect|"
-             r"no se (aplica|muestra|calcula|actualiza|env[ií]a|guarda|carga|ve)|deber[ií]a (dar|mostrar|ser)|sale (mal|vac[ií])|no responde|no hace nada|no reacciona|se queda (cargando|colgad)|\bcrash|crashea|\banr\b|se cierra|"
+             r"no se (aplica|muestra|calcula|actualiza|env[ií]a|guarda|carga|ve)|no (calcula|muestra|actualiza|valida|navega|abre)\b|deber[ií]a (dar|mostrar|ser)|sale (mal|vac[ií])|no responde|no hace nada|no reacciona|se queda (cargando|colgad)|\bcrash|crashea|\banr\b|se cierra|"
              r"se congela|freeze|no compila|build fail|memory leak|fuga de memoria", "S")),
     ("issue", (r"\bissue|ticket|#\d+|reporte de|incidencia|jira", "S")),
     ("update", (r"actualiz|upgrade|\bbump|dependenc|versi[oó]n|migrar a |migra a |deprecad|deprecat|\bupdate\b|configur|\.env|ci/cd|pipeline|"
                 r"\bpods?\b|\bspm\b|swift package|gradle|\bagp\b|target ?sdk|min ?sdk|deployment target|xcode \d", "S")),
-    ("refactor", (r"refactor|reorganiz|limpi|extrae|extract|simplific|deuda t|renombra.*(m[oó]dulo|carpeta)|desacopl", "M")),
+    ("refactor", (r"refactor|reorganiz|limpi|extrae|extract|simplific|deuda t|renombra.*(m[oó]dulo|carpeta)|desacopl|"
+                  r"modulariz|migr(a|ar)(lo|la|los|las)?\b|clean arch|\bclean\b|\bsolid\b|arquitectura|architecture|"
+                  r"hexagonal|\bmvvm\b|\bmvi\b|\bviper\b|\btca\b|separa(r)? en capas|por capas|inyecci[oó]n de dependencias", "M")),
     ("test", (r"\bprueba|\btest|cobertura|coverage|e2e|unitari", "S")),
     ("docs", (r"document|readme|comentari|jsdoc|docstring|changelog", "XS")),
     ("ajuste", (r"typo|ortograf|texto|label|etiqueta|copy|mensaje|placeholder|color|margen|margin|padding|alinea|"
@@ -46,7 +48,8 @@ UP = [  # señales que suben el peso
     r"m[oó]dulo|sistema|panel|dashboard|integraci[oó]n|pasarela|pagos|autenticaci[oó]n|\bauth|roles|permisos|multi.?tenant",
     r"base de datos|migraci[oó]n|esquema|schema|modelo de datos",
     r"producci[oó]n|intermitente|a veces|race|concurren|datos corrupt|p[eé]rdida de datos|rendimiento|performance",
-    r"arquitectura|redise[nñ]|reescrib|rewrite|desde cero",
+    r"arquitectura|architecture|clean arch|\bclean\b|\bsolid\b|hexagonal|\bmvvm\b|\bmvi\b|\bviper\b|\btca\b|"
+    r"redise[nñ]|reescrib|rewrite|desde cero|modulariz|por capas|en capas|\bcapas\b|layers",
     r"a la versi[oó]n \d+|versi[oó]n mayor|major (version|upgrade)",
     r"ambas plataformas|ios y android|android y ios|en las dos (apps|plataformas)",
 ]
@@ -115,29 +118,70 @@ def classify(text: str, hint: str | None = None) -> dict:
             "Responde en esta sesión; usa code_locate si necesitas ver código. Sin sub-agentes."}
 
 
-def locate(store: Store, text: str, k: int = 5) -> list[dict]:
-    """Archivos más probables según el índice BM25 del código (y specs). No carga modelos."""
-    words = [w for w in re.findall(r"[a-záéíóúñ_][\wáéíóúñ]{2,}", text.lower()) if w not in STOP]
-    if not words:
-        return []
-    ids = store._fts(" ".join(words), ["code", "spec"], 40)
-    if not ids:
-        return []
-    rows = {r[0]: r[1] for r in store.db.execute(
-        f"SELECT id, source FROM memories WHERE id IN ({','.join('?' * len(ids))})", ids)}
+BUILD_RX = re.compile(r"(^|/)(build\.gradle(\.kts)?|settings\.gradle(\.kts)?|gradle\.properties|Package\.(swift|resolved)|"
+                      r"Podfile(\.lock)?|Cartfile|project\.pbxproj|Fastfile|Gemfile|package(-lock)?\.json|pyproject\.toml|"
+                      r"\w+\.xcscheme|libs\.versions\.toml)$")
+
+
+def locate(store: Store, text: str, k: int = 5, include_build: bool = False) -> list[dict]:
+    """Archivos más probables: primero el índice de símbolos (nombres de tipos), luego BM25 del código. Sin modelos.
+
+    Los archivos de build (gradle, Package.swift, Podfile, pbxproj…) solo se sugieren si `include_build` (tareas de
+    actualización/configuración): en el resto de tareas suelen ser coincidencias de ruido.
+    """
+    raw = re.findall(r"[A-Za-z_][\w]{2,}", text)
+    words = [w for w in (x.lower() for x in re.findall(r"[a-záéíóúñ_][\wáéíóúñ]{2,}", text.lower())) if w not in STOP]
     files: "OrderedDict[str, dict]" = OrderedDict()
-    for rank, mid in enumerate(ids):
-        src = rows.get(mid, "")
-        path, _, line = src.rpartition(":")
-        if not path:
-            path, line = src, "1"
-        f = files.setdefault(path, {"archivo": path, "lineas": [], "score": 0.0})
-        f["score"] += 1.0 / (1 + rank)
-        if line and len(f["lineas"]) < 3:
-            f["lineas"].append(line)
+    # 1) símbolos: "CheckoutViewModel" exacto o "checkout" como prefijo/feature
+    try:
+        from .features import lookup
+        for h in lookup(store, [w for w in raw if w.lower() not in STOP], 12):
+            f = files.setdefault(h["path"], {"archivo": h["path"], "lineas": [], "score": 0.0})
+            f["score"] += h["score"]
+            if len(f["lineas"]) < 3 and str(h["line"]) not in f["lineas"]:
+                f["lineas"].append(str(h["line"]))
+    except Exception:
+        pass  # BD sin tabla de símbolos (proyecto sin reindexar)
+    # 2) BM25 sobre fragmentos de código y specs
+    if words:
+        ids = store._fts(" ".join(words), ["code", "spec"], 40)
+        if ids:
+            rows = {r[0]: r[1] for r in store.db.execute(
+                f"SELECT id, source FROM memories WHERE id IN ({','.join('?' * len(ids))})", ids)}
+            for rank, mid in enumerate(ids):
+                src = rows.get(mid, "")
+                path, _, line = src.rpartition(":")
+                if not path:
+                    path, line = src, "1"
+                f = files.setdefault(path, {"archivo": path, "lineas": [], "score": 0.0})
+                f["score"] += 1.0 / (1 + rank)
+                if line and len(f["lineas"]) < 3 and line not in f["lineas"]:
+                    f["lineas"].append(line)
+    if not include_build:
+        for path in [p for p in files if BUILD_RX.search(p)]:
+            files.pop(path)
     ranked = sorted(files.values(), key=lambda f: -f["score"])
     top = ranked[0]["score"] if ranked else 0
     return [f for f in ranked if f["score"] >= top * 0.4][:k]  # descarta coincidencias débiles
+
+
+def _feature_lines(store: Store, text: str) -> list[str]:
+    """Líneas del catálogo de features para las features mencionadas en la tarea."""
+    try:
+        from .features import features_in
+        names = features_in(store, text)
+        if not names:
+            return []
+        row = store.db.execute("SELECT text FROM memories WHERE kind='scan' AND tags='features' ORDER BY id DESC LIMIT 1").fetchone()
+        if not row:
+            return []
+        out = []
+        for line in row[0].split("\n")[1:]:
+            if any(line.startswith(f"- {n} [") for n in names):
+                out.append(line)
+        return out[:4]
+    except Exception:
+        return []
 
 
 def triage(root: Path | str | None, text: str, hint: str | None = None, store: Store | None = None) -> dict:
@@ -148,7 +192,7 @@ def triage(root: Path | str | None, text: str, hint: str | None = None, store: S
         res["archivos_usuario"] = explicit[:6]
     else:
         st = store or Store(root, use_vectors=False)
-        res["archivos"] = locate(st, text)
+        res["archivos"] = locate(st, text, include_build=res["tipo"] == "update")
         n = len(res["archivos"])
         # muchos archivos relevantes dispersos en módulos distintos → probablemente más alcance
         dirs = {str(Path(f["archivo"]).parent) for f in res["archivos"]}
@@ -156,6 +200,8 @@ def triage(root: Path | str | None, text: str, hint: str | None = None, store: S
             res["peso"] = _bump(res["peso"], 1)
             res["ruta"] = ROUTES[res["peso"]]
             res["razones"].append("código relevante disperso en varios módulos")
+    st = store or Store(root, use_vectors=False)
+    res["features"] = _feature_lines(st, text)
     return res
 
 
@@ -168,6 +214,8 @@ def render(res: dict) -> str:
     elif res.get("archivos"):
         lines.append("Código probable (lee solo estos rangos primero): " + ", ".join(
             f"{f['archivo']}:{','.join(f['lineas'])}" for f in res["archivos"]))
+    if res.get("features"):
+        lines.append("Feature(s) mencionadas (capas actuales):\n" + "\n".join(res["features"]))
     if res["tipo"] == "diseño":
         lines.append("Diseño con referencia: regístrala (`agentes design ref <ruta>` o `agentes design figma <url>`), usa la "
                      "paleta medida y verifica con `agentes design shot` + `agentes design compare` (/design-ref).")

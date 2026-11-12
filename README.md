@@ -92,9 +92,12 @@ Código probable (lee solo estos rangos primero): src/lib/pricing.ts:1, src/app/
 | **XL** | sistema o módulo nuevo de punta a punta | Dividir en entregas; ningún workflow sin confirmación |
 
 - **Tipos detectados:** `feature`, `fix`, `issue`, `update`, `refactor`, `ajuste`, `test`, `docs`, `seguridad` y `pregunta`.
+- **Arquitectura detectada:** "migrar a Clean", "MVVM", "SOLID", "modularizar", "por capas"… se clasifican como `refactor` y suben el peso (normalmente a **L**).
 - **Dónde está el código:**
   - El escaneo genera un **mapa del código** (rol de cada carpeta y puntos de entrada) que entra en el contexto de cada sesión.
-  - Si no indicas archivos, el triaje sugiere los más probables según el índice. Si mencionas un archivo, parte de ese.
+  - Si no indicas archivos, el triaje sugiere los más probables: primero por **nombre de tipo** (`CheckoutViewModel` → su archivo y línea exactos) y luego por el índice del código. Si mencionas un archivo, parte de ese.
+  - Los archivos de build (gradle, `Package.swift`, Podfile, pbxproj…) solo se sugieren en tareas de actualización.
+  - Si mencionas una feature ("el checkout"), el triaje agrega sus **capas actuales** (ver "Catálogo de features").
   - Los agentes tienen la herramienta `code_locate` para lo mismo.
 - **Índice al día:** el índice se actualiza en segundo plano al iniciar cada sesión (si tiene más de 15 min) y después de cada tarea de una Spec de Kiro.
 - **Tu criterio manda:** si dices que una tarea es más grande o más chica, el equipo te hace caso.
@@ -295,7 +298,7 @@ Lo que más consume es la cantidad de sesiones de agente y el código que lee ca
 - **Traspasos cortos:** cada paso responde en 150 palabras o menos y deja los detalles en archivos.
 - **Búsquedas compactas:** `memory_search` devuelve 5 fragmentos cortos con `archivo:línea` (antes llegaba a ~3,000 tokens; ahora ~660). Para obtener el texto completo, usa `full: true`.
 - **Auto-recall selectivo:**
-  - Ignora respuestas cortas ("sí", "continúa") y los comandos.
+  - Ignora respuestas cortas ("sí", "continúa") y comandos sin tarea (`/tasks`, `/remember`…).
   - Exige relevancia real con el mensaje.
   - Nunca repite una memoria en la misma sesión.
   - No repite las reglas, porque ya llegan al inicio de la sesión.
@@ -311,6 +314,8 @@ settings:
   auto_recall_k: 3         # memorias por mensaje
 ```
 Hábitos que también ayudan:
+- Menciona la feature o el módulo ("el checkout", `:feature:checkout`): el triaje trae sus capas y archivos.
+- Guarda como regla lo que no quieres repetir en cada prompt: `agentes memory add -k rule "Clean + MVVM; DI con Hilt"`.
 - Usa Quick Spec en lugar de la Spec completa cuando la feature ya está clara.
 - Abre una sesión nueva por tarea.
 - Menciona archivos concretos (`#archivo`).
@@ -319,7 +324,37 @@ Hábitos que también ayudan:
 
 ## 8. Memoria y contexto
 
-- **Una base de datos por proyecto** (`.agentes/agentes.db`), con estos tipos de memoria: `rule` (reglas siempre presentes), `decision`, `convention`, `design`, `requirement`, `bug`, `security`, `learning`, `profile`, `scan`, `code`, `spec` (specs de Kiro) y `note`.
+- **Una base de datos por proyecto** (`.agentes/agentes.db`), con estos tipos de memoria: `rule` (reglas siempre presentes), `architecture` (arquitectura real; siempre presente), `feature` (features entregadas), `decision`, `convention`, `design`, `requirement`, `bug`, `security`, `learning`, `profile`, `scan`, `code`, `spec` (specs de Kiro) y `note`.
+
+### Qué contexto recibe cada sesión
+Al iniciar la sesión, el orquestador recibe un resumen de unos 6,000 caracteres como máximo (~1,700 tokens) y **no vuelve a pedirlo** con `project_context`. Contiene, en este orden de prioridad:
+
+| Sección | De dónde sale | Se recorta |
+|---|---|---|
+| Reglas obligatorias | `agentes memory add -k rule "…"` | nunca |
+| Comandos de build/test/lint | escaneo (`xcodebuild …`, `./gradlew …`, scripts) | nunca; siempre completos |
+| Perfil y **Arquitectura** | `/kickoff`, `/onboard` (memoria `architecture`) | casi nunca |
+| Design system, mapa del código y **Features** | índice del código | después |
+| Stack, decisiones, convenciones, tareas | memoria | antes |
+| Diseño y aprendizajes | memoria | primero |
+
+Si no cabe todo, se quitan **líneas completas** de las secciones menos importantes; nunca se corta un comando ni una línea a la mitad.
+
+**Por rol:** cada sub-agente llama a `project_context(role="<su nombre>")` y recibe solo lo que necesita. Por ejemplo, QA recibe comandos, arquitectura y convenciones, pero no la paleta; UX recibe el diseño y el design system, pero no los comandos de build. Las secciones de cada rol están en `ROLE_SECTIONS` (`store.py`).
+
+**Auto-recall también en los flujos:** `/feature`, `/fix`, `/implement`… buscan memorias con el texto de la tarea (antes los comandos no recibían ninguna).
+
+### Catálogo de features
+`agentes index` (y el reindexado en segundo plano) extrae los **tipos y funciones públicas** de Swift, Kotlin, Java, TS/JS y Python, sin modelo, y los guarda con su `archivo:línea`. A cada uno le asigna:
+- una **capa**: UI, presentación, dominio, datos o DI. Se decide por la carpeta (`domain/`, `data/`, `di/`…) o por el sufijo (`ViewModel`, `UseCase`, `Repository`, `Screen`…);
+- una **feature**: la carpeta `Features/<X>`, el módulo `feature/<x>` o, si no hay, el prefijo del tipo (`CheckoutViewModel` → Checkout).
+
+Con eso se genera una línea por feature y plataforma, que entra en el contexto de cada sesión:
+```
+- Checkout [ios] Tienda/Features/Checkout/ — UI: CheckoutView · presentación: CheckoutViewModel (sin dominio, datos)
+- Checkout [android] app/src/…/ui/checkout/ — UI: CheckoutScreen (sin presentación, dominio, datos)
+```
+Así, "migra el checkout a Clean" llega sabiendo qué capas existen y cuáles faltan, sin explorar el proyecto. Los tests y el design system no entran en el catálogo; el DS tiene su propio catálogo. Al cerrar un `/feature`, el equipo guarda una memoria `feature` de 60 palabras como máximo, que aparece en la misma sección con ✔.
 - **Búsqueda híbrida**: combina vectores (ChromaDB) con BM25 (SQLite FTS5) mediante Reciprocal Rank Fusion.
   - BM25 encuentra las palabras exactas, como nombres de funciones o términos.
   - Los vectores encuentran por significado: paráfrasis y preguntas en otro idioma.
@@ -507,6 +542,7 @@ agentes/
   clean.py         # limpieza de restos con respaldo
   logs.py          # log rotativo .agentes/agentes.log
   triage.py        # triaje: tipo y peso de la tarea, ruta más barata y localización de código
+  features.py      # índice de símbolos (tipo → archivo:línea, capa, feature) y catálogo de features por capas
   store.py         # memoria: SQLite + FTS5 + ChromaDB (híbrida), perfil, tareas
   scanner.py       # análisis de proyectos existentes + indexado incremental de código
   mcp_server.py    # servidor MCP sin dependencias (memory_*, profile_*, task_*, project_context)

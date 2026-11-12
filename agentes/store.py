@@ -30,6 +30,8 @@ KINDS = {
     "bug": "Bugs encontrados y su causa raíz",
     "security": "Hallazgos y políticas de seguridad",
     "learning": "Aprendizajes / gotchas del proyecto",
+    "architecture": "Arquitectura real del proyecto: capas, patrones, módulos, DI y flujo de datos (se inyecta siempre)",
+    "feature": "Features entregadas: qué hacen, módulos y archivos clave (se listan en el contexto)",
     "scan": "Resultados del análisis automático del proyecto",
     "code": "Fragmentos de código indexados",
     "spec": "Specs de Kiro indexadas (.kiro/specs: requirements/design/tasks)",
@@ -87,12 +89,45 @@ CREATE TABLE IF NOT EXISTS files (
 TASK_STATUSES = ("todo", "doing", "review", "testing", "blocked", "done")
 
 # Versión del esquema de la BD (PRAGMA user_version). Cada entrada migra desde la versión anterior.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MIGRATIONS = {
     2: ["CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind)",
         "CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source)",
         "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)"],
+    # v3: índice de símbolos (tipos y funciones públicas con archivo:línea, capa y feature) para code_locate y el
+    # catálogo de features; meta guarda versiones de índices derivados.
+    3: ["CREATE TABLE IF NOT EXISTS symbols (name TEXT NOT NULL, kind TEXT, path TEXT NOT NULL, line INTEGER, "
+        "layer TEXT DEFAULT '', feature TEXT DEFAULT '', platform TEXT DEFAULT '')",
+        "CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name COLLATE NOCASE)",
+        "CREATE INDEX IF NOT EXISTS idx_symbols_path ON symbols(path)",
+        "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"],
 }
+
+# Secciones del contexto por rol (project_context(role=...)). None = todas. Los nombres son los títulos internos
+# de context_summary. Los agentes que no aparecen reciben todo.
+_DEV = ["rules", "profile", "architecture", "commands", "ds", "map", "features", "stack", "decision", "convention",
+        "learning", "tasks"]
+ROLE_SECTIONS: dict[str, list[str]] = {
+    "backend-dev": [s for s in _DEV if s != "ds"],
+    "frontend-dev": _DEV + ["design"], "fullstack-dev": _DEV + ["design"],
+    "ios-dev": _DEV + ["design"], "android-dev": _DEV + ["design"],
+    "qa-engineer": ["rules", "profile", "architecture", "commands", "map", "features", "stack", "convention",
+                    "learning", "tasks"],
+    "code-reviewer": ["rules", "profile", "architecture", "commands", "ds", "map", "decision", "convention", "learning"],
+    "ux-designer": ["rules", "profile", "ds", "design", "features", "map", "tasks"],
+    "product-analyst": ["rules", "profile", "features", "decision", "design", "tasks"],
+    "security-engineer": ["rules", "profile", "architecture", "commands", "map", "stack", "decision", "learning"],
+    "devops-engineer": ["rules", "profile", "commands", "stack", "map", "decision", "learning"],
+}
+
+
+def clip(text: str, n: int) -> str:
+    """Recorta sin partir palabras y marca el corte con …"""
+    text = " ".join(str(text).split())
+    if len(text) <= n:
+        return text
+    cut = text[:n].rsplit(" ", 1)[0]
+    return (cut if len(cut) > n * 0.6 else text[:n]).rstrip(",;:") + " …"
 
 
 @contextlib.contextmanager
@@ -489,51 +524,77 @@ class Store:
         return [dict(r) for r in self.db.execute(sql, args)]
 
     # ------------------------------------------------------------------ contexto
-    def context_summary(self, max_chars: int = 6000) -> str:
-        """Resumen compacto que se inyecta al iniciar cada sesión."""
-        parts = []
+    def context_summary(self, max_chars: int = 6000, role: str | None = None) -> str:
+        """Resumen compacto que se inyecta al iniciar cada sesión (o por rol para los sub-agentes).
+
+        Cada sección tiene prioridad; si no cabe todo se quitan líneas completas de las secciones menos importantes
+        (nunca se corta un comando o una línea a la mitad).
+        """
+        want = ROLE_SECTIONS.get(role or "") if role else None
+        secs: list[tuple[str, str, int, list[str]]] = []  # (clave, título, prioridad 0=nunca se recorta, líneas)
+
+        def add(key: str, title: str, prio: int, lines: list[str]):
+            if lines and (want is None or key in want):
+                secs.append((key, title, prio, lines))
+
         # solo reglas del usuario o de la migración (un agente no puede crear reglas permanentes)
         rules = [r for r in reversed(self.list("rule", 60)) if not str(r.get("agent", "")).startswith("mcp")]
-        if rules:
-            budget, lines = 2500, []
-            for r in rules:
-                t = r["text"].strip().replace("\n", " ")[:400]
-                if budget - len(t) < 0:
-                    lines.append("- (más reglas: usa memory_search con kinds='rule')")
-                    break
-                budget -= len(t)
-                lines.append(f"- {t}")
-            parts.append("## Reglas obligatorias\n" + "\n".join(lines))
-        cmap = self.db.execute("SELECT text FROM memories WHERE kind='scan' AND tags='mapa' ORDER BY id DESC LIMIT 1").fetchone()
+        add("rules", "Reglas obligatorias", 0, [f"- {clip(r['text'], 400)}" for r in rules])
         prof = self.profile_get()
-        if prof:
-            lines = []
-            for section, kv in prof.items():
-                lines.append(f"[{section}] " + "; ".join(f"{k}={v}" for k, v in kv.items()))
-            parts.append("## Perfil del proyecto\n" + "\n".join(lines))
-        else:
-            parts.append("## Perfil del proyecto\n(vacío) -> ejecuta /kickoff (proyecto nuevo) o /onboard (existente)")
+        add("profile", "Perfil del proyecto", 1, [f"[{sec}] " + "; ".join(f"{k}={v}" for k, v in kv.items())
+                                                 for sec, kv in prof.items()]
+            or ["(vacío) -> ejecuta /kickoff (proyecto nuevo) o /onboard (existente)"])
+        add("architecture", "Arquitectura", 1, [f"- {clip(r['text'], 700)}" for r in self.list("architecture", 2)])
+        scan = self.list("scan", 60)
+        by_tag = {r.get("tags"): r for r in scan if r.get("tags") in ("mapa", "features")}
+        cmds, stack = [], []
+        for r in scan:
+            if r.get("tags") in ("mapa", "features"):
+                continue
+            txt = r["text"]
+            if txt.startswith("Comandos del proyecto en ") or txt.startswith("Targets de Makefile"):
+                head, _, body = txt.partition(": ")
+                where = head.replace("Comandos del proyecto en ", "")
+                for part in body.split("; "):
+                    name, sep, cmd = part.partition(" => ")
+                    cmds.append(f"- {where} {name}: `{cmd}`" if sep else f"- {where}: {part}")
+            else:
+                stack.append(f"- {clip(txt, 300)}")
+        add("commands", "Comandos (úsalos tal cual)", 0, cmds[:24])
         try:
             from .ds import load_catalog, summary_line
             dsl = summary_line(load_catalog(self.root))
-            if dsl:
-                parts.append("## Design system\n" + dsl)
+            add("ds", "Design system", 1, [dsl] if dsl else [])
         except Exception:
             pass
-        if cmap:
-            parts.append("## Dónde está el código\n" + cmap[0].split("\n", 1)[-1][:1000]
-                         + "\n(Si no te indican archivos: usa la herramienta code_locate antes de explorar.)")
-        for kind, title, n in (("scan", "Stack y comandos detectados", 10), ("decision", "Decisiones recientes", 6), ("convention", "Convenciones", 8),
-                               ("design", "Diseño", 5), ("learning", "Aprendizajes", 5)):
-            rows = [r for r in self.list(kind, n + 1) if r.get("tags") != "mapa"][:n]
-            if rows:
-                parts.append(f"## {title}\n" + "\n".join(f"- {r['text'][:220]}" for r in rows))
+        if "mapa" in by_tag:
+            add("map", "Dónde está el código", 2, [l for l in by_tag["mapa"]["text"].split("\n")[1:] if l.strip()]
+                + ["(Si no te indican archivos: usa code_locate antes de explorar.)"])
+        feats = [l for l in by_tag["features"]["text"].split("\n")[1:] if l.strip()] if "features" in by_tag else []
+        done = [f"- ✔ {clip(r['text'], 200)}" for r in self.list("feature", 8)]
+        add("features", "Features (capas detectadas en el código; ✔ = entregadas por el equipo)", 2, feats + done)
+        add("stack", "Stack detectado", 3, stack[:10])
+        for kind, title, n, prio in (("decision", "Decisiones recientes", 6, 3), ("convention", "Convenciones", 8, 3),
+                                     ("design", "Diseño", 5, 4), ("learning", "Aprendizajes", 5, 4)):
+            add(kind, title, prio, [f"- {clip(r['text'], 260)}" for r in self.list(kind, n)])
         tasks = self.task_list()
-        if tasks:
-            parts.append("## Tareas abiertas\n" + "\n".join(
-                f"- #{t['id']} [{t['status']}] {t['title']} ({t['assignee'] or 'sin asignar'})" for t in tasks[:12]))
-        text = "\n\n".join(parts)
-        return text[:max_chars]
+        add("tasks", "Tareas abiertas", 3, [f"- #{t['id']} [{t['status']}] {clip(t['title'], 90)} "
+                                            f"({t['assignee'] or 'sin asignar'})" for t in tasks[:12]])
+
+        def render() -> str:
+            return "\n\n".join(f"## {title}\n" + "\n".join(lines) for _, title, _, lines in secs if lines)
+
+        text = render()
+        # recorta por líneas completas, de la sección menos prioritaria (y desde el final) hacia la más importante
+        for prio in (4, 3, 2, 1):
+            for _, _, p, lines in reversed(secs):
+                while p == prio and len(text) > max_chars and len(lines) > 1:
+                    lines.pop()
+                    text = render()
+                if p == prio and len(text) > max_chars and lines:
+                    lines.clear()
+                    text = render()
+        return text
 
     # ------------------------------------------------------------------ export / import
     def export(self) -> dict:

@@ -703,6 +703,9 @@ FILLER = {"favor", "también", "tambien", "ahora", "luego", "después", "despues
           "otra", "otro", "vez", "porfa", "please", "anterior", "mismo", "misma", "igual", "hazlo", "haz"}
 
 
+NO_RECALL_CMDS = {"remember", "recall", "tasks", "bench", "retro", "kickoff"}
+
+
 def _refresh_index_background(root: Path, max_age_s: int = 900) -> None:
     """Re-indexa el código en segundo plano (incremental) si el índice tiene más de 15 min. No bloquea la sesión."""
     stamp = root / HARNESS_DIR / "index.stamp"
@@ -816,8 +819,13 @@ def _recall(root: Path, data: dict) -> None:
     import re as _re
     settings = load_team(root).get("settings", {})
     prompt = _prompt_text(data)
-    if not settings.get("auto_recall", True) or prompt.startswith("/"):
+    if not settings.get("auto_recall", True):
         return
+    if prompt.startswith("/"):  # en flujos (/feature, /fix…) también: busca con el texto de la tarea
+        cmd, _, prompt = prompt[1:].partition(" ")
+        if cmd in NO_RECALL_CMDS or not prompt.strip():
+            return
+        prompt = prompt.strip()
     words = _re.findall(r"\w+", prompt.lower())
     if len(prompt) < settings.get("auto_recall_min_chars", 20) or all(w in ACKS or w in STOP for w in words):
         return
@@ -825,7 +833,8 @@ def _recall(root: Path, data: dict) -> None:
     k = int(settings.get("auto_recall_k", 3))
     need = int(settings.get("auto_recall_min_overlap", 2))
     s = Store(root)
-    kinds = ["decision", "convention", "design", "requirement", "bug", "security", "learning", "profile", "note"]
+    kinds = ["architecture", "feature", "decision", "convention", "design", "requirement", "bug", "security", "learning",
+             "profile", "note"]
 
     def relevant(h) -> bool:
         overlap = len(terms & set(_re.findall(r"\w+", h["text"].lower())))
